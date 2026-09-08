@@ -1,4 +1,4 @@
-# MSC Library — lib.msceducation.net
+# MSC Library — library.msceducation.net
 
 Static site for the Montessori School Committee (MSC) library, Kurnool.
 Sibling to [MSC-Website](https://github.com/kammaash/MSC-Website), which serves
@@ -13,9 +13,9 @@ will be migrated into these files.
 
 | File | URL |
 | --- | --- |
-| `index.html` | `lib.msceducation.net/` |
-| `dashboard/index.html` | `lib.msceducation.net/dashboard` |
-| `login/index.html` | `lib.msceducation.net/login` |
+| `index.html` | `library.msceducation.net/` |
+| `dashboard/index.html` | `library.msceducation.net/dashboard` |
+| `login/index.html` | `library.msceducation.net/login` |
 
 The `dashboard/index.html` layout (rather than `dashboard.html`) is what makes the
 clean `/dashboard` URL work on GitHub Pages without a redirect layer.
@@ -32,7 +32,7 @@ is migrated in.
 Domain is registered at Squarespace (nameservers `nsa1-4.squarespacedns.com`).
 The subdomain is one record:
 
-    Type: CNAME   Host: lib   Value: kammaash.github.io
+    Type: CNAME   Host: library   Value: kammaash.github.io
 
 ## Notes
 
