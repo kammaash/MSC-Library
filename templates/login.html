@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ product_name }} — Welcome</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body class="login-page" data-csrf="{{ csrf_token }}">
+
+<!-- ============== WELCOME / SPLASH SCREEN ============== -->
+<div class="welcome-screen" id="welcomeScreen">
+  <div class="welcome-glow"></div>
+  <div class="welcome-content">
+    <div class="welcome-logos">
+      <img src="{{ url_for('static', filename='images/logo_main.png') }}" alt="" class="welcome-logo-main">
+      <img src="{{ url_for('static', filename='images/logo_smartlib360.png') }}" alt="" class="welcome-logo-product">
+    </div>
+    <h1 class="welcome-school-name">{{ school_name }}</h1>
+    <p class="welcome-sub">{{ school_address }}</p>
+    <p class="welcome-system-full">{{ product_descriptor }}</p>
+    <p class="welcome-system-badge">{{ product_name }}</p>
+    <p class="welcome-tagline">{{ product_tagline }}</p>
+    <button type="button" id="enterBtn" class="welcome-enter-btn">Enter {{ product_name }} &rarr;</button>
+    <p class="welcome-developed-by">Developed by K S NANDA KISHORE, Department of Computer Science</p>
+  </div>
+</div>
+
+<!-- ============== LOGIN FORM SCREEN ============== -->
+<div class="login-card" id="loginCard" style="display:none;">
+  <div class="crest-row">
+    <img src="{{ url_for('static', filename='images/logo_main.png') }}" alt="">
+    <img src="{{ url_for('static', filename='images/logo_smartlib360.png') }}" alt="">
+  </div>
+  <h1>{{ school_name }}</h1>
+  <p class="sub-login">{{ school_address }}</p>
+  <p class="system-name-full">{{ product_descriptor }}</p>
+  <p class="system-name-badge">{{ product_name }}</p>
+  <p class="tagline">{{ product_tagline }}</p>
+
+  <div class="role-toggle">
+    <button type="button" id="staffModeBtn" class="active">Staff / Admin</button>
+    <button type="button" id="studentModeBtn">Student</button>
+  </div>
+
+  <form id="loginForm">
+    <div id="staffFields">
+      <label>Username
+        <input type="text" id="username" autocomplete="username">
+      </label>
+      <label>Password
+        <input type="password" id="password" autocomplete="current-password">
+      </label>
+    </div>
+    <div id="studentFields" style="display:none;">
+      <label>Admission Number
+        <input type="text" id="admissionNo" autocomplete="username">
+      </label>
+      <label>Date of Birth (this is your password)
+        <input type="text" id="dobPassword" placeholder="DD-MM-YYYY">
+      </label>
+      <div id="pinEnterBlock" style="display:none;">
+        <label>PIN
+          <input type="password" id="studentPin" inputmode="numeric" autocomplete="off" placeholder="Your 4-6 digit PIN">
+        </label>
+        <p class="login-hint" style="margin:4px 0 0;">
+          <a href="#" id="forgotPinLink">Forgot your PIN?</a>
+        </p>
+      </div>
+      <div id="pinCreateBlock" style="display:none;">
+        <p class="login-hint" style="margin-top:0;">First time signing in — please create a PIN. Choose 4 to 6 digits and remember it (or ask a parent to note it down) — you'll need it every time you sign in from now on.</p>
+        <label>Create a PIN
+          <input type="password" id="newPin" inputmode="numeric" autocomplete="off" placeholder="4-6 digits">
+        </label>
+        <label>Confirm PIN
+          <input type="password" id="confirmPin" inputmode="numeric" autocomplete="off" placeholder="Re-enter your PIN">
+        </label>
+      </div>
+      <div id="forgotPinBlock" style="display:none;">
+        <p class="login-hint" style="margin-top:0;">
+          Enter your Admission Number and Date of Birth above, then confirm here to ask a librarian to clear your PIN.
+          You'll be able to set a new one next time you sign in, once they approve it.
+        </p>
+        <button type="button" class="ghost" id="forgotPinSubmit">Request PIN Reset</button>
+        <button type="button" class="ghost" id="forgotPinCancel">Cancel</button>
+      </div>
+    </div>
+    <p class="login-error" id="loginError"></p>
+    <p class="login-hint" id="loginInfo" style="display:none;"></p>
+    <button type="submit" class="brass" id="loginSubmitBtn">Sign In</button>
+  </form>
+
+  <p class="login-hint">Students sign in with Admission Number, Date of Birth, and a PIN.</p>
+  <button type="button" class="ghost back-to-welcome-btn" id="backToWelcomeBtn">&larr; Back</button>
+</div>
+
+<script>
+/* ---------- Welcome screen -> Login form transition ---------- */
+const welcomeScreen = document.getElementById('welcomeScreen');
+const loginCard = document.getElementById('loginCard');
+
+function showLoginCard() {
+  welcomeScreen.classList.add('welcome-fade-out');
+  setTimeout(() => {
+    welcomeScreen.style.display = 'none';
+    loginCard.style.display = '';
+    requestAnimationFrame(() => loginCard.classList.add('login-fade-in'));
+  }, 450);
+}
+document.getElementById('enterBtn').addEventListener('click', showLoginCard);
+document.getElementById('backToWelcomeBtn').addEventListener('click', () => {
+  loginCard.classList.remove('login-fade-in');
+  loginCard.style.display = 'none';
+  welcomeScreen.style.display = '';
+  welcomeScreen.classList.remove('welcome-fade-out');
+});
+
+/* ---------- Staff / Student toggle ---------- */
+const staffBtn = document.getElementById('staffModeBtn');
+const studentBtn = document.getElementById('studentModeBtn');
+const staffFields = document.getElementById('staffFields');
+const studentFields = document.getElementById('studentFields');
+let roleMode = 'staff';
+
+staffBtn.addEventListener('click', () => {
+  roleMode = 'staff';
+  staffBtn.classList.add('active'); studentBtn.classList.remove('active');
+  staffFields.style.display = ''; studentFields.style.display = 'none';
+});
+studentBtn.addEventListener('click', () => {
+  roleMode = 'student';
+  studentBtn.classList.add('active'); staffBtn.classList.remove('active');
+  staffFields.style.display = 'none'; studentFields.style.display = '';
+});
+
+const pinEnterBlock = document.getElementById('pinEnterBlock');
+const pinCreateBlock = document.getElementById('pinCreateBlock');
+
+// If the student edits admission number or DOB after a PIN step was
+// revealed, that PIN step was for whatever they'd typed before — hide
+// it again so they don't submit a PIN against a different account.
+['admissionNo', 'dobPassword'].forEach(id => {
+  document.getElementById(id).addEventListener('input', () => {
+    pinEnterBlock.style.display = 'none';
+    pinCreateBlock.style.display = 'none';
+    document.getElementById('forgotPinBlock').style.display = 'none';
+    document.getElementById('loginInfo').style.display = 'none';
+    document.getElementById('loginSubmitBtn').style.display = '';
+  });
+});
+
+document.getElementById('loginForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const errorEl = document.getElementById('loginError');
+  errorEl.textContent = '';
+
+  const payload = { role_mode: roleMode };
+  if (roleMode === 'staff') {
+    payload.username = document.getElementById('username').value.trim();
+    payload.password = document.getElementById('password').value;
+  } else {
+    payload.username = document.getElementById('admissionNo').value.trim();
+    payload.password = document.getElementById('dobPassword').value.trim();
+    if (pinEnterBlock.style.display !== 'none') {
+      payload.pin = document.getElementById('studentPin').value.trim();
+    }
+    if (pinCreateBlock.style.display !== 'none') {
+      payload.new_pin = document.getElementById('newPin').value.trim();
+      payload.confirm_pin = document.getElementById('confirmPin').value.trim();
+    }
+  }
+
+  try {
+    const res = await fetch('/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': document.body.dataset.csrf || '' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      errorEl.textContent = data.error || 'Sign in failed.';
+      // A wrong PIN shouldn't send the student back to square one —
+      // keep the PIN box open, clear only the wrong PIN they typed,
+      // and refocus it so they can just retype and hit Sign In again.
+      if (data.need_pin) {
+        pinEnterBlock.style.display = '';
+        pinCreateBlock.style.display = 'none';
+        const pinInput = document.getElementById('studentPin');
+        pinInput.value = '';
+        pinInput.focus();
+      }
+      return;
+    }
+
+    if (data.must_set_pin) {
+      pinCreateBlock.style.display = '';
+      pinEnterBlock.style.display = 'none';
+      document.getElementById('newPin').focus();
+      return;
+    }
+    if (data.need_pin) {
+      pinEnterBlock.style.display = '';
+      pinCreateBlock.style.display = 'none';
+      document.getElementById('studentPin').focus();
+      return;
+    }
+    window.location.href = data.must_change_password ? '/change-password' : '/';
+  } catch (err) {
+    errorEl.textContent = 'Could not reach the server. Please try again.';
+  }
+});
+
+/* ---------- Forgot PIN? (self-service request, admin/librarian approves) ---------- */
+const forgotPinLink = document.getElementById('forgotPinLink');
+const forgotPinBlock = document.getElementById('forgotPinBlock');
+const loginInfo = document.getElementById('loginInfo');
+const loginSubmitBtn = document.getElementById('loginSubmitBtn');
+
+forgotPinLink.addEventListener('click', (e) => {
+  e.preventDefault();
+  pinEnterBlock.style.display = 'none';
+  forgotPinBlock.style.display = '';
+  loginSubmitBtn.style.display = 'none';
+  document.getElementById('loginError').textContent = '';
+});
+
+document.getElementById('forgotPinCancel').addEventListener('click', () => {
+  forgotPinBlock.style.display = 'none';
+  pinEnterBlock.style.display = '';
+  loginSubmitBtn.style.display = '';
+  loginInfo.style.display = 'none';
+});
+
+document.getElementById('forgotPinSubmit').addEventListener('click', async () => {
+  const errorEl = document.getElementById('loginError');
+  errorEl.textContent = '';
+  loginInfo.style.display = 'none';
+  try {
+    const res = await fetch('/api/pin-reset-request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': document.body.dataset.csrf || '' },
+      body: JSON.stringify({
+        admission_no: document.getElementById('admissionNo').value.trim(),
+        dob: document.getElementById('dobPassword').value.trim(),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) { errorEl.textContent = data.error || 'Could not submit request.'; return; }
+    loginInfo.textContent = data.message;
+    loginInfo.style.display = '';
+    forgotPinBlock.style.display = 'none';
+  } catch (err) {
+    errorEl.textContent = 'Could not reach the server. Please try again.';
+  }
+});
+</script>
+</body>
+</html>

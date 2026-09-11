@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ product_name }} — First-Time Setup</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body class="login-page" data-csrf="{{ csrf_token }}">
+
+<div class="login-card setup-card" id="setupCard">
+  <div class="crest-row">
+    <img src="{{ url_for('static', filename='images/logo_main.png') }}" alt="">
+    <img src="{{ url_for('static', filename='images/logo_smartlib360.png') }}" alt="">
+  </div>
+  <h1>Welcome to {{ product_name }}</h1>
+  <p class="sub-login">Let's set up your library, one time only</p>
+  <p class="tagline">This runs once, the very first time the system starts on a new computer.</p>
+
+  <form id="setupForm">
+    <label>School Name
+      <input type="text" id="schoolName" placeholder="e.g. Riverside Public School" autocomplete="organization">
+    </label>
+    <label>School Address / Location
+      <input type="text" id="schoolAddress" placeholder="e.g. Main Street, Your City" autocomplete="address-level2">
+    </label>
+    <label>Your Name (the person setting this up)
+      <input type="text" id="adminName" placeholder="e.g. Library Administrator" autocomplete="name">
+    </label>
+    <label>Choose an Admin Username
+      <input type="text" id="adminUsername" autocomplete="username">
+    </label>
+    <label>Choose an Admin Password
+      <input type="password" id="adminPassword" autocomplete="new-password">
+    </label>
+    <label>Confirm Password
+      <input type="password" id="confirmPassword" autocomplete="new-password">
+    </label>
+    <label class="full-width">School Logo (optional)
+      <input type="file" id="schoolLogo" accept="image/png,image/jpeg,image/jpg">
+    </label>
+    <p class="login-hint full-width" style="margin-top:0;">
+      PNG or JPG, under 5 MB. This replaces the logo shown on the login and
+      home screens. You can skip this and add it later if you don't have
+      the file ready right now. Password must be at least 8 characters,
+      with both letters and numbers — this will be the main Admin account
+      for the library, so write it down somewhere safe.
+    </p>
+    <p class="login-error full-width" id="setupError"></p>
+    <button type="submit" class="brass full-width">Create Admin Account &amp; Continue</button>
+  </form>
+</div>
+
+<script>
+document.getElementById('setupForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const errorEl = document.getElementById('setupError');
+  errorEl.textContent = '';
+
+  const logoFile = document.getElementById('schoolLogo').files[0];
+  if (logoFile && logoFile.size > 5 * 1024 * 1024) {
+    errorEl.textContent = 'Logo file is too large — please use one under 5 MB.';
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append('school_name', document.getElementById('schoolName').value.trim());
+  formData.append('school_address', document.getElementById('schoolAddress').value.trim());
+  formData.append('admin_name', document.getElementById('adminName').value.trim());
+  formData.append('admin_username', document.getElementById('adminUsername').value.trim());
+  formData.append('admin_password', document.getElementById('adminPassword').value);
+  formData.append('confirm_password', document.getElementById('confirmPassword').value);
+  if (logoFile) formData.append('school_logo', logoFile);
+
+  try {
+    const res = await fetch('/setup', {
+      method: 'POST',
+      body: formData,
+      headers: { 'X-CSRF-Token': document.body.dataset.csrf || '' },
+    });
+    const data = await res.json();
+    if (!res.ok) { errorEl.textContent = data.error || 'Setup failed. Please try again.'; return; }
+    window.location.href = '/login';
+  } catch (err) {
+    errorEl.textContent = 'Could not reach the server. Please try again.';
+  }
+});
+</script>
+</body>
+</html>

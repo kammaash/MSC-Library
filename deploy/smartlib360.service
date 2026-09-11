@@ -1,0 +1,36 @@
+# systemd service for SmartLib360 (MSLRMS) on a VPS.
+#
+# INSTALL:
+#   sudo cp smartlib360.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now smartlib360
+#
+# LOGS:
+#   sudo journalctl -u smartlib360 -f
+#
+# Edit the two paths below (WorkingDirectory, ExecStart) to match where
+# you actually copied the SmartLib360 folder on the server, and the user
+# it should run as (a plain, non-root user — see the deployment guide).
+
+[Unit]
+Description=SmartLib360 (MSLRMS) - Library Management System
+After=network.target
+
+[Service]
+Type=simple
+User=smartlib
+Group=smartlib
+WorkingDirectory=/home/smartlib/SmartLib360
+Environment="LIBRARY_BIND_HOST=127.0.0.1"
+Environment="LIBRARY_FORCE_HTTPS_COOKIES=1"
+ExecStart=/home/smartlib/SmartLib360/venv/bin/python /home/smartlib/SmartLib360/app.py
+Restart=on-failure
+RestartSec=5
+
+# Basic sandboxing — the service can only write inside its own folder.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/smartlib/SmartLib360
+
+[Install]
+WantedBy=multi-user.target

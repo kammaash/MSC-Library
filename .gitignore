@@ -1,0 +1,37 @@
+# Runtime data — never commit real student/library data or the live DB
+database.db
+database.db-wal
+database.db-shm
+uploads/pdfs/*
+uploads/barcodes/*
+uploads/qrcodes/*
+uploads/backups/*
+!uploads/pdfs/.gitkeep
+!uploads/barcodes/.gitkeep
+!uploads/qrcodes/.gitkeep
+!uploads/backups/.gitkeep
+reports/
+logs/
+
+# Secrets — the app generates this locally if LIBRARY_SECRET_KEY isn't set
+# in the environment; on Render, LIBRARY_SECRET_KEY is set directly instead,
+# so this file should never exist there, and never be committed here.
+instance_secret.key
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.egg-info/
+
+# Build artifacts
+build/
+dist/
+*.spec.bak
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

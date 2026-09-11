@@ -1,0 +1,30 @@
+Short answer: **yes, you can merge it in — no code changes needed on your end**, but a few things matter for it to go smoothly.
+
+## What "merge" actually means here
+
+Do **not** unzip on top of your live folder and let everything overwrite blindly. Instead, from the zip, only these 6 files go into your real folder:
+
+| Copy this file | Into your folder as |
+|---|---|
+| `app.py` | **overwrite** your existing `app.py` |
+| `security.py` | new file, next to `app.py` |
+| `backup_scheduler.py` | new file, next to `app.py` |
+| `templates/login.html` | **overwrite** your existing `templates/login.html` |
+| `templates/setup.html` | new file, into your `templates/` folder |
+| `templates/change_password.html` | new file, into your `templates/` folder |
+
+Leave your real `models.py`, `database.db`, `uploads/`, `reports/`, and `static/` completely alone — the zip's copies of `templates/index.html` and `static/` are only there so the package is self-contained; they're not meant to replace your live ones.
+
+## Do you need to change anything?
+
+No — a few things I made sure of specifically so this would be a true drop-in:
+
+- **No new pip packages.** `security.py` and `backup_scheduler.py` only use Python's built-in `sqlite3`, `threading`, `time`, `os`, `shutil`, `datetime` — nothing to install.
+- **No changes to `models.py`.** The new features store their own state in two small tables they create for themselves inside your existing `database.db`, so your real model file works as-is.
+- **Existing accounts are safe.** Since your database already has users, the setup wizard auto-detects that on first run and skips itself — you'll go straight to your normal login screen, not the wizard.
+
+## One thing worth double-checking, not fixing
+
+I built and tested this against a stand-in model file (since your real `models.py` wasn't in the upload) that has the same `User`/`Member` fields your `app.py` already uses elsewhere. Since your real `models.py` is what the *rest* of `app.py` has always run against successfully, it should already have everything the new code needs (`User.password_hash`, `User.role`, `User.phone`, `Member.dob`, `Member.admission_no`, etc.) — I'm just not able to guarantee that with 100% certainty without seeing the actual file.
+
+So: copy the files in, then **run it on a test copy of your folder first if you can**, and walk through the checklist from the guide (create a staff account → log in as them → confirm the forced password screen appears → confirm a normal existing-admin login still works). If both of those behave as described, you're good to run it live.

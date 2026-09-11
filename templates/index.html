@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>{{ product_name }} — {{ school_name }}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<script src="{{ url_for('static', filename='vendor/chart.umd.js') }}"></script>
+</head>
+<body data-role="{{ user.role }}" data-name="{{ user.name }}" data-csrf="{{ csrf_token }}">
+
+<div class="credit-badge-fixed"><span>Created by K S NANDA KISHORE</span></div>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <div class="crest crest-school"><img src="{{ url_for('static', filename='images/logo_main.png') }}" alt=""></div>
+    <div class="title-center">
+      <h1>{{ school_name }}</h1>
+      <p class="sub">{{ school_address }}</p>
+      <p class="system-name-full">{{ product_descriptor }}</p>
+      <p class="system-name-badge">{{ product_name }}</p>
+      <p class="tagline">{{ product_tagline }}</p>
+    </div>
+    <div class="crest crest-product"><img src="{{ url_for('static', filename='images/logo_smartlib360.png') }}" alt=""></div>
+  </div>
+  <div class="masthead-bar">
+    <div class="session-pill"><span class="dot"></span> {{ user.name }} · {{ user.role|capitalize }}
+      <button id="logoutBtn">Sign out</button>
+    </div>
+    <div class="masthead-right">
+      <button id="digitalLibraryQuickBtn" class="dl-quick-btn">📚 Digital Library</button>
+      <div class="hint">Today's date · <strong id="todayDate"></strong></div>
+    </div>
+  </div>
+</header>
+
+<nav class="drawers" id="tabs">
+  <div class="tab active" data-view="home">Home</div>
+  <div class="tab role-staff" data-view="dashboard">Dashboard</div>
+  <div class="tab role-staff" data-view="books">Catalog</div>
+  <div class="tab role-staff" data-view="members">Members</div>
+  <div class="tab role-staff" data-view="circulation">Issue &amp; Return</div>
+  <div class="tab role-student" data-view="mylibrary">My Library</div>
+  <div class="tab" data-view="achievements">🏆 Achievements</div>
+  <div class="tab role-staff" data-view="qrlibrary">QR Code Library</div>
+  <div class="tab role-staff" data-view="registers">Registers</div>
+  <div class="tab role-staff" data-view="reports">Reports</div>
+  <div class="tab role-admin" data-view="users">Manage Users</div>
+</nav>
+
+<main>
+
+  <!-- HOME -->
+  <section class="view active" id="view-home">
+    <h2>Welcome, {{ user.name }}</h2>
+    <p class="home-intro">"A library is not a luxury but one of the necessities of life." Every book on
+      these shelves — and every PDF, EPUB, and recording in our Digital Library — is here to open a door:
+      to a subject you love, a question you're curious about, or a world you haven't discovered yet.
+      {{ school_name }} is proud to share this growing collection with you — explore it below.</p>
+    <div class="stat-row" id="homeStats"></div>
+
+    <h3 class="home-section-title">📚 From Our Shelves</h3>
+    <div class="online-grid" id="homeCatalogHighlights"></div>
+
+    <h3 class="home-section-title">🖥️ From the Digital Library</h3>
+    <div class="online-grid" id="homeDigitalHighlights"></div>
+  </section>
+
+  <!-- DASHBOARD -->
+  <section class="view" id="view-dashboard">
+    <h2>Dashboard</h2>
+    <div class="stat-row" id="dashStats"></div>
+
+    <h3 class="home-section-title">📦 Library Stock Summary</h3>
+    <p class="hint">A clear, always-current picture of every physical copy the library owns.</p>
+    <div class="stat-row" id="stockSummary"></div>
+
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-top:20px;">
+      <div><h3>Subject-wise Books</h3><canvas id="subjectChart" height="220"></canvas></div>
+      <div><h3>Monthly Issues</h3><canvas id="monthlyChart" height="220"></canvas></div>
+    </div>
+    <h3 style="margin-top:24px;">Most Borrowed Books</h3>
+    <div class="table-wrap"><table><thead><tr><th>Title</th><th>Times Issued</th></tr></thead>
+      <tbody id="topBooksBody"></tbody></table></div>
+  </section>
+
+  <!-- CATALOG -->
+  <section class="view" id="view-books">
+    <h2>Catalog</h2>
+    <div class="toolbar">
+      <input type="text" id="bookSearch" placeholder="Search by title, author, ISBN, accession no, rack no...">
+      <button class="brass" id="addBookBtn">+ Add Book</button>
+      <button class="secondary" id="exportBooksBtn">⬇ Export Excel</button>
+      <button class="secondary" id="importBooksBtn">⬆ Import Excel</button>
+      <input type="file" id="importBooksInput" accept=".xlsx" style="display:none;">
+      <button class="danger role-admin" id="incompleteBadge" style="display:none;" title="Remove catalog entries with no title/author left over from a failed import"></button>
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Acc. No</th><th>Title</th><th>Author</th><th>Subject</th><th>Rack</th><th>Copies</th><th>Status</th><th>Barcode</th><th></th></tr></thead>
+      <tbody id="booksBody"></tbody>
+    </table></div>
+  </section>
+
+  <!-- MEMBERS -->
+  <section class="view" id="view-members">
+    <h2>Members</h2>
+    <div class="toolbar">
+      <button class="danger" id="pinRequestsBadge" style="display:none;" title="Students who asked for their PIN to be cleared"></button>
+    </div>
+    <div class="toolbar">
+      <input type="text" id="memberSearch" placeholder="Search by name, member ID, class, admission no...">
+      <button class="brass" id="addMemberBtn">+ Add Member</button>
+      <button class="secondary" id="exportMembersBtn">⬇ Export Excel</button>
+      <button class="secondary" id="importMembersBtn">⬆ Import Excel</button>
+      <input type="file" id="importMembersInput" accept=".xlsx" style="display:none;">
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Member ID</th><th>Name</th><th>Type</th><th>Class/Dept</th><th>Admission No.</th><th>DOB</th><th>PIN</th><th>Active Loans</th><th>QR</th><th></th></tr></thead>
+      <tbody id="membersBody"></tbody>
+    </table></div>
+  </section>
+
+  <!-- ISSUE & RETURN -->
+  <section class="view" id="view-circulation">
+    <h2>Issue &amp; Return</h2>
+    <div class="toolbar">
+      <select id="circFilter">
+        <option value="active">Currently issued</option>
+        <option value="overdue">Overdue only</option>
+        <option value="all">All loans</option>
+      </select>
+      <button class="brass" id="issueBtn">+ Issue a Book</button>
+      <button class="secondary" id="exportIssuesBtn">⬇ Export Excel</button>
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Acc. No</th><th>Member</th><th>Issued</th><th>Due</th><th>Status</th><th>Fine (₹)</th><th></th></tr></thead>
+      <tbody id="circBody"></tbody>
+    </table></div>
+  </section>
+
+  <!-- MY LIBRARY (student-only) -->
+  <section class="view" id="view-mylibrary">
+    <h2>My Library</h2>
+    <p class="hint">Your books, reading history, and saved items — all in one place.</p>
+    <div class="stat-row" id="myLibraryPoints"></div>
+
+    <h3 class="home-section-title">📖 My Books (currently borrowed)</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Title / Acc. No</th><th>Issued</th><th>Due</th><th>Status</th></tr></thead>
+      <tbody id="myBooksBody"></tbody>
+    </table></div>
+
+    <h3 class="home-section-title">🔖 Bookmarks</h3>
+    <div class="online-grid" id="myBookmarksGrid"></div>
+
+    <h3 class="home-section-title">⭐ Favorites</h3>
+    <div class="online-grid" id="myFavoritesGrid"></div>
+
+    <h3 class="home-section-title">🕓 Recently Read</h3>
+    <div class="online-grid" id="myRecentGrid"></div>
+
+    <h3 class="home-section-title">✨ Recommended For You</h3>
+    <div class="online-grid" id="myRecsGrid"></div>
+
+    <h3 class="home-section-title">📜 Borrowing History</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Title / Acc. No</th><th>Issued</th><th>Due</th><th>Returned</th><th>Status</th></tr></thead>
+      <tbody id="myHistoryBody"></tbody>
+    </table></div>
+  </section>
+
+  <!-- ACHIEVEMENTS (leaderboard + certificates) -->
+  <section class="view" id="view-achievements">
+    <h2>🏆 Achievements</h2>
+    <p class="hint">Earn points by borrowing books and reading in the Digital Library. Top readers get recognized with digital certificates.</p>
+
+    <div id="myPointsBanner" style="display:none;"></div>
+
+    <h3 class="home-section-title">🥇 Leaderboard</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Rank</th><th>Name</th><th>Class</th><th>Points</th></tr></thead>
+      <tbody id="leaderboardBody"></tbody>
+    </table></div>
+
+    <div id="awardCertificateBlock" style="display:none;">
+      <h3 class="home-section-title">🎖️ Award a Certificate</h3>
+      <div class="toolbar">
+        <select id="certMemberSelect"></select>
+        <select id="certTitleSelect">
+          <option value="Top Reader of the Month">Top Reader of the Month</option>
+          <option value="Most Active Library User">Most Active Library User</option>
+          <option value="Reading Champion">Reading Champion</option>
+        </select>
+        <button class="brass" id="awardCertBtn">Award Certificate</button>
+      </div>
+    </div>
+
+    <h3 class="home-section-title">🎓 My Certificates</h3>
+    <div class="online-grid" id="myCertificatesGrid"></div>
+  </section>
+
+  <!-- ONLINE BOOKS -->
+  <section class="view" id="view-online">
+    <h2>Digital Library</h2>
+    <p class="hint">PDFs, EPUBs, Word docs, PowerPoints, audio and video — searchable by title, author, subject, and (for PDFs/Word/PowerPoint) the text inside the document itself.</p>
+
+    <div class="dl-stats-strip" id="dlStatsStrip"></div>
+
+    <div class="dl-category-grid" id="dlCategoryGrid">
+      <div class="dl-cat-tile" data-cat-action="all" style="--tile-c:#12294f;"><div class="dl-cat-icon">📚</div><div class="dl-cat-label">Digital Books</div></div>
+      <div class="dl-cat-tile" data-cat-action="category:Fiction" style="--tile-c:#a3352b;"><div class="dl-cat-icon">📖</div><div class="dl-cat-label">Story Books</div></div>
+      <div class="dl-cat-tile" data-cat-action="subject-wise" style="--tile-c:#1d7a4c;"><div class="dl-cat-icon">📘</div><div class="dl-cat-label">Subject-wise Books</div></div>
+      <div class="dl-cat-tile" data-cat-action="type:audio" style="--tile-c:#8a5a00;"><div class="dl-cat-icon">🎧</div><div class="dl-cat-label">Audiobooks</div></div>
+      <div class="dl-cat-tile" data-cat-action="type:video" style="--tile-c:#6a3fa0;"><div class="dl-cat-icon">🎥</div><div class="dl-cat-label">Educational Videos</div></div>
+      <div class="dl-cat-tile" data-cat-action="category:Question Papers" style="--tile-c:#0b6e8f;"><div class="dl-cat-icon">📝</div><div class="dl-cat-label">Previous Question Papers</div></div>
+      <div class="dl-cat-tile" data-cat-action="category:Notes" style="--tile-c:#b8860b;"><div class="dl-cat-icon">📂</div><div class="dl-cat-label">Notes &amp; Assignments</div></div>
+      <div class="dl-cat-tile" data-cat-action="focus-search" style="--tile-c:#12294f;"><div class="dl-cat-icon">🔍</div><div class="dl-cat-label">Smart Search</div></div>
+      <div class="dl-cat-tile" data-cat-action="recommended" style="--tile-c:#a3352b;"><div class="dl-cat-icon">⭐</div><div class="dl-cat-label">Recommended Books</div></div>
+    </div>
+    <div id="dlActiveFilterBanner" style="display:none;"></div>
+
+    <div id="dlSubjectSection" style="display:none;">
+      <h3 class="home-section-title">📘 Browse by Subject</h3>
+      <div class="dl-category-grid" id="dlSubjectIconGrid"></div>
+    </div>
+
+    <div class="toolbar">
+      <input type="text" id="onlineSearch" placeholder="Smart Search — try a title, author, subject, or even a phrase from inside a document...">
+      <select id="onlineGenreFilter"><option value="">All Categories</option></select>
+      <select id="onlineCategoryFilter"><option value="">All Subjects</option></select>
+      <select id="onlineTypeFilter">
+        <option value="">All File Types</option>
+        <option value="pdf">PDF</option>
+        <option value="epub">EPUB</option>
+        <option value="docx">Word (docx)</option>
+        <option value="doc">Word (doc)</option>
+        <option value="pptx">PowerPoint (pptx)</option>
+        <option value="ppt">PowerPoint (ppt)</option>
+        <option value="mp4">Video (mp4)</option>
+        <option value="webm">Video (webm)</option>
+        <option value="mp3">Audio (mp3)</option>
+        <option value="wav">Audio (wav)</option>
+        <option value="m4a">Audio (m4a)</option>
+      </select>
+      <button class="brass" id="addOnlineBookBtn" style="display:none;">+ Add to Library</button>
+      <button class="secondary" id="bulkImportOnlineBtn" style="display:none;">⬆ Bulk Import</button>
+      <input type="file" id="bulkImportOnlineInput"
+             accept=".pdf,.epub,.doc,.docx,.ppt,.pptx,.mp4,.webm,.mp3,.wav,.m4a" multiple style="display:none;">
+    </div>
+    <div id="relatedContentPanel" style="display:none; margin-bottom:16px;"></div>
+    <div id="searchSuggestions"></div>
+    <div class="online-grid" id="onlineGrid"></div>
+  </section>
+
+  <!-- QR CODE LIBRARY (printable index of QR codes for every digital item) -->
+  <section class="view" id="view-qrlibrary">
+    <h2>QR Code Library</h2>
+    <p class="hint">Every item in the Digital Library gets its own QR code. Print this sheet and post it on a
+      notice board, in a textbook, or at a reading corner — students scan it with any phone camera and the
+      item opens straight in their browser (they'll need to be signed in, and be on the school Wi-Fi/network).</p>
+    <div class="toolbar">
+      <input type="text" id="qrSearch" placeholder="Filter by title...">
+      <button class="secondary" id="printQrBtn">🖶 Print QR Sheet</button>
+      <button class="secondary" id="regenQrBtn" style="display:none;">↻ Fix QR Codes Not Opening on Phones</button>
+    </div>
+    <div class="online-grid" id="qrGrid"></div>
+  </section>
+
+  <!-- REGISTERS (lost books / stock / periodicals / visitors / donations) -->
+  <section class="view" id="view-registers">
+    <h2>Registers</h2>
+    <div class="toolbar">
+      <select id="registerPicker">
+        <option value="lost">Lost Book Register</option>
+        <option value="stock">Stock Verification</option>
+        <option value="periodicals">Newspaper &amp; Magazine Register</option>
+        <option value="visitors">Visitor Register</option>
+        <option value="donations">Book Donation Register</option>
+      </select>
+      <button class="brass" id="addRegisterBtn">+ Add Entry</button>
+    </div>
+    <div class="table-wrap"><table>
+      <thead id="registerHead"></thead>
+      <tbody id="registerBody"></tbody>
+    </table></div>
+  </section>
+
+  <!-- REPORTS -->
+  <section class="view" id="view-reports">
+    <h2>Reports</h2>
+    <p class="hint">Generated as PDF, ready to print or save.</p>
+    <div class="io-row">
+      <button class="brass" onclick="window.open('/api/reports/issue-register')">Issue Register</button>
+      <button class="brass" onclick="window.open('/api/reports/overdue')">Overdue Books</button>
+      <button class="brass" onclick="window.open('/api/reports/fine-register')">Fine Register</button>
+      <button class="brass" onclick="window.open('/api/reports/member-list')">Member List</button>
+      <button class="brass" onclick="window.open('/api/reports/stock-report')">Stock Report</button>
+    </div>
+
+    <h3 class="home-section-title">🔍 Possible Duplicate Titles</h3>
+    <p class="hint">Same title appearing under more than one Accession Number — could be extra batches
+      of the same book (fine as-is), or an accidental double entry worth merging. This just shows you
+      what to look at; nothing is changed automatically.</p>
+    <div class="io-row"><button class="secondary" id="findDuplicatesBtn">Scan Catalog for Duplicates</button></div>
+    <div id="duplicatesResult" style="margin-top:14px;"></div>
+  </section>
+
+  <!-- MANAGE USERS -->
+  <section class="view" id="view-users">
+    <h2>Manage Users</h2>
+    <div class="toolbar"><button class="brass" id="addUserBtn">+ Add Account</button></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Username</th><th>Role</th><th>Name</th><th>Phone</th><th></th></tr></thead>
+      <tbody id="usersBody"></tbody>
+    </table></div>
+
+    <h3 style="margin-top:30px;">School Branding</h3>
+    <p class="muted" style="margin-top:0;">Institution name, address, and logo shown across the login, home, and
+      printed reports. Update these any time — for example, if the name shown is still a generic placeholder.</p>
+    <form id="brandingForm" class="io-row" style="flex-direction:column; align-items:flex-start; gap:12px; max-width:420px;">
+      <label style="width:100%;">Institution Name
+        <input type="text" id="brandSchoolName" value="{{ school_name }}" style="width:100%; margin-top:4px;">
+      </label>
+      <label style="width:100%;">Institution Address
+        <input type="text" id="brandSchoolAddress" value="{{ school_address }}" style="width:100%; margin-top:4px;">
+      </label>
+      <label style="width:100%;">Replace Logo <span style="font-weight:400;">(optional, PNG/JPG under 5 MB)</span>
+        <input type="file" id="brandLogo" accept="image/png,image/jpeg,image/jpg" style="width:100%; margin-top:4px;">
+      </label>
+      <button type="submit" class="brass">Save Branding</button>
+      <p id="brandingMsg" style="margin:0; font-size:13px;"></p>
+    </form>
+
+    <h3 style="margin-top:30px;">Backup &amp; Restore</h3>
+    <div class="io-row">
+      <button class="brass" id="backupBtn">⬇ Backup Now</button>
+      <button class="secondary" id="listBackupsBtn">View Backups</button>
+    </div>
+    <div id="backupList" style="margin-top:12px;"></div>
+  </section>
+
+</main>
+
+<div class="footer-note">{{ school_name }} — {{ product_name }}</div>
+
+<div class="modal-overlay" id="modalOverlay"><div class="modal" id="modalBody"></div></div>
+<div class="toast" id="toast"></div>
+
+<div id="pdfViewerOverlay">
+  <div class="pdf-frame-wrap">
+    <div class="pdf-bar"><span id="pdfTitle"></span><button class="ghost" id="closePdfBtn" style="color:#fff;border-color:#fff;">Close</button></div>
+    <iframe id="pdfFrame" oncontextmenu="return false;"></iframe>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
