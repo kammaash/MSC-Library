@@ -31,6 +31,7 @@ from flask_login import (
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
+from sqlalchemy.exc import IntegrityError
 
 from models import (
     db, User, Book, Member, Issue, FinePayment, LostBook, StockCheck,
@@ -1834,22 +1835,26 @@ def _compute_points(member_id):
     explain to a student who asks "how do I get more points":
       +10 for each physical book issued
       +5  for each physical book returned on time (no fine)
-      +5  for each distinct digital item read (first open only, not every re-read)
-      +2  for every 5 total digital-library opens (rewards revisiting/study, capped contribution)
+      +5  for each distinct digital item read (once ever, not per re-read)
       +2  for each distinct day the student visited the Digital Library
+
+    Reopening something already read earns nothing further — see
+    _log_read_history for how that's enforced at the database level, not
+    just by convention. (An earlier version also added a small bonus for
+    revisiting the same item several times; that was removed because it
+    made the total drift upward just from reopening things, which ran
+    against the "read it once, get the points once" rule this school
+    wants.)
     """
     issues = Issue.query.filter_by(member_id=member_id).all()
     issued_points = len(issues) * 10
     ontime_points = sum(5 for i in issues if i.status == "Returned" and (i.fine or 0) == 0)
 
-    reads = ReadHistory.query.filter_by(member_id=member_id).all()
-    distinct_read_points = len(reads) * 5
-    total_opens = sum(r.open_count or 1 for r in reads)
-    revisit_points = (total_opens // 5) * 2
+    distinct_read_points = ReadHistory.query.filter_by(member_id=member_id).count() * 5
 
     visit_points = DigitalLibraryVisit.query.filter_by(member_id=member_id).count() * 2
 
-    return issued_points + ontime_points + distinct_read_points + revisit_points + visit_points
+    return issued_points + ontime_points + distinct_read_points + visit_points
 
 
 @app.route("/api/student/visit-digital-library", methods=["POST"])
@@ -1972,35 +1977,55 @@ def student_my_flags():
 
 def _log_read_history(member, book_id):
     """
-    Records/updates that this student opened this digital item — powers
-    Recently Read + points. Never raises; a logging failure should never
-    break reading.
+    Records that this student opened this digital item — powers Recently
+    Read, and (via ReadHistory's row count) points. Points are awarded
+    for a book exactly once, ever, the first time a student opens it —
+    never for reopening it again, whether that's a genuine re-read
+    tomorrow or the browser re-fetching the same file five times in one
+    sitting. Never raises; a logging failure should never break reading.
 
     Point-safety: the /view route below is hit by the browser every time
-    it (re-)requests the file — including a plain page refresh, or the
-    <video>/<audio>/<iframe> tag re-fetching the same source. That used to
-    increment open_count on every single one of those requests, and
-    open_count feeds directly into points (revisit_points), so a student
-    could inflate their score just by hammering refresh — no reading
-    required. The fix: a book/video/audio only ever counts as one "open"
-    per student per calendar day. Reopening it later the same day updates
-    last_opened (so Recently Read still reflects the latest visit) but
-    does not bump open_count or award anything further. This keeps the
-    "first time you read this item, you get the points" behavior intact
-    while making the count immune to refresh-spam.
+    it (re-)requests the file — including a plain page refresh, and
+    especially a <video>/<audio> tag, which the browser fetches via
+    multiple separate HTTP Range requests just to buffer/seek one
+    playback, not one request per view. Earlier versions of this
+    function checked "has this been opened today?" before deciding
+    whether to count it — but that check-then-write wasn't atomic, so
+    several of those near-simultaneous Range requests could each see "no,
+    not opened today yet" before any of them had saved, and each create
+    an extra row — permanently inflating points, since points are based
+    on ReadHistory's row count. The fix here is two-part: first, the
+    database itself now enforces at most one ReadHistory row per
+    (student, item) — see the unique constraint on the model — so it's
+    no longer possible for concurrent requests to create duplicates no
+    matter how they're timed. Second, points now come only from that one
+    row ever existing, not from open_count, which is kept purely as a
+    "how many times has this been opened" statistic for admin dashboards
+    and no longer feeds into the points total at all.
     """
     try:
         today = today_iso()
-        row = ReadHistory.query.filter_by(member_id=member.member_id, online_book_id=book_id).first()
-        if row:
-            if row.last_opened != today:
-                row.open_count = (row.open_count or 1) + 1
-            row.last_opened = today
-        else:
-            db.session.add(ReadHistory(member_id=member.member_id, online_book_id=book_id,
-                                        first_opened=today, last_opened=today, open_count=1))
+        db.session.add(ReadHistory(member_id=member.member_id, online_book_id=book_id,
+                                    first_opened=today, last_opened=today, open_count=1))
         db.session.commit()
+    except IntegrityError:
+        # The unique constraint fired — a row already exists (either from
+        # a genuinely earlier read, or from a concurrent request that won
+        # this exact race). Either way, no new points: just bump the
+        # existing row's stats so Recently Read and the open-count
+        # statistic stay accurate.
+        db.session.rollback()
+        try:
+            row = ReadHistory.query.filter_by(member_id=member.member_id, online_book_id=book_id).first()
+            if row:
+                row.open_count = (row.open_count or 1) + 1
+                row.last_opened = today
+                db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            app.logger.warning(f"Could not update read history after race: {e}")
     except Exception as e:
+        db.session.rollback()
         app.logger.warning(f"Could not log read history: {e}")
 
 

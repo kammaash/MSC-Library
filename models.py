@@ -305,8 +305,18 @@ class ReadHistory(db.Model):
     One row per (student, digital item) ever opened — updated, not
     re-inserted, on repeat reads, so this doubles as both "Recently Read"
     (sort by last_opened) and a read-count for points/leaderboards.
+
+    The unique constraint matters beyond just preventing accidental
+    duplicates: it's what makes _log_read_history's "first open" check in
+    app.py safe under concurrent requests (e.g. a video's HTTP Range
+    requests, or a fast double-refresh) — without it, two near-
+    simultaneous requests could each see "no row yet" and both insert
+    one, permanently inflating that student's points by an extra +5.
     """
     __tablename__ = "read_history"
+    __table_args__ = (
+        db.UniqueConstraint("member_id", "online_book_id", name="uq_read_history_member_book"),
+    )
     id = db.Column(db.Integer, primary_key=True)
     member_id = db.Column(db.String(30), nullable=False)
     online_book_id = db.Column(db.Integer, db.ForeignKey("online_books.id"), nullable=False)
