@@ -1,43 +1,34 @@
-# MSC Library — library.msceducation.net
+# SmartLib 360
 
-Static site for the Montessori School Committee (MSC) library, Kurnool.
-Sibling to [MSC-Website](https://github.com/kammaash/MSC-Website), which serves
-`www.msceducation.net`. Separate repo because GitHub Pages allows one custom
-domain per repository.
+Smart Library & Learning Resource Management System for the Montessori School
+Committee (MSC) library, Kurnool. Intended to be served at
+`library.msceducation.net`.
 
-**Status: blank route shells.** Every HTML file here is an empty valid document,
-placed so the URLs resolve. The real application is being built externally and
-will be migrated into these files.
+Python Flask app with SQLAlchemy. Uses SQLite (`database.db`) locally, or
+Postgres when `DATABASE_URL` is set.
 
-## Routes
+## Run locally
 
-| File | URL |
-| --- | --- |
-| `index.html` | `library.msceducation.net/` |
-| `dashboard/index.html` | `library.msceducation.net/dashboard` |
-| `login/index.html` | `library.msceducation.net/login` |
+    pip install -r requirements.txt
+    python app.py
 
-The `dashboard/index.html` layout (rather than `dashboard.html`) is what makes the
-clean `/dashboard` URL work on GitHub Pages without a redirect layer.
+Then open http://localhost:5000. On Windows, `START_LIBRARY.bat` /
+`RUN_SmartLib360.bat` do the same.
+
+On first run with a fresh database the app redirects to the Setup Wizard
+(`/setup`) to create the admin account — there is no default login.
 
 ## Deployment
 
-GitHub Pages, from the `main` branch, root folder. No build step — pushing to
-`main` publishes. `CNAME` claims the custom domain; `.nojekyll` stops Jekyll from
-ignoring `_`-prefixed folders, which matters when a built app (`_next/`, `_app/`)
-is migrated in.
+- **Render:** `Procfile` starts `gunicorn app:app`. Set `DATABASE_URL`
+  (Postgres) and `LIBRARY_SECRET_KEY` in the service environment.
+- **VPS:** see [deploy/DEPLOY_TO_VPS.md](deploy/DEPLOY_TO_VPS.md) for the
+  Nginx + systemd setup.
+- **Windows .exe:** `BUILD_EXE.bat` builds a standalone executable with
+  PyInstaller (`MontessoriDigitalLibrary.spec`).
 
-## DNS
+## Never commit
 
-Domain is registered at Squarespace (nameservers `nsa1-4.squarespacedns.com`).
-The subdomain is one record:
-
-    Type: CNAME   Host: library   Value: kammaash.github.io
-
-## Notes
-
-- The repo is public: GitHub Pages requires it on the free plan. Source is
-  readable by anyone — never commit credentials, keys, or student data.
-- Pages is static hosting with no server. A real `/login` will need an external
-  auth provider, or a move to a host with serverless functions (Cloudflare Pages,
-  Netlify). The route is a placeholder until then.
+This repo is public. `database.db` (student and library data),
+`instance_secret.key` (session signing key), `uploads/`, `reports/` and
+`logs/` are gitignored — keep them that way.

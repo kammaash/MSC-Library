@@ -295,7 +295,13 @@ form input, form select { width: 100%; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
 
 /* ---------- online books grid ---------- */
-.online-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; margin-top: 6px; }
+/* minmax lowered from 260px to 190px, and the card below made more
+   compact, so noticeably more items fit per row on the same screen
+   width — the actual ask was "more books visible at once", and the
+   grid's minimum card width is what was capping that, not the icon
+   itself (it's just the emoji at the front of the title, which shrinks
+   naturally with the smaller heading below). */
+.online-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; margin-top: 6px; }
 
 /* ---------- Digital Library: NDL-style category browsing ---------- */
 .dl-stats-strip {
@@ -356,11 +362,37 @@ form input, form select { width: 100%; }
 .online-card {
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 14px;
+  padding: 12px;
   background: var(--white);
 }
-.online-card h4 { margin-bottom: 4px; }
-.online-card p { margin: 0 0 10px 0; font-size: 12px; color: var(--ink-soft); }
+.online-card h4 { margin-bottom: 4px; font-size: 14px; line-height: 1.3; }
+.online-card p { margin: 0 0 8px 0; font-size: 11px; color: var(--ink-soft); }
+/* Book cards shrank to fit more per row, but their 4-button action row
+   (Read Online / Edit / QR / Delete) no longer has room to stay on one
+   line without clipping text — "Read Online" in particular was showing
+   as "Read Onl...". Scoped to .online-card specifically (rather than
+   changing .io-row itself, which is shared by several other, differently-
+   sized button rows elsewhere in the app) so only book cards get this
+   2-per-row layout; a card with just one button (like the mini "Read
+   Online"-only cards in My Library) still displays that single button
+   full-width, unaffected. */
+.online-card .io-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  flex-wrap: unset;
+  gap: 6px;
+}
+.online-card .io-row button {
+  padding: 6px 4px;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* A row with only one button (e.g. the "Read Online"-only mini-cards in
+   My Library) spans both grid columns instead of sitting half-width
+   with empty space beside it. */
+.online-card .io-row button:only-child { grid-column: 1 / -1; }
 
 /* ---------- io-row (report buttons, backup buttons) ---------- */
 .io-row { display: flex; flex-wrap: nowrap; gap: 6px; }
