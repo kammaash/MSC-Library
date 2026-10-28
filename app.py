@@ -1275,6 +1275,16 @@ def serve_upload(subpath):
     folder = posixpath.normpath(subpath.replace("\\", "/")).lstrip("/").lower()
     if folder == "backups" or folder.startswith("backups/"):
         abort(404)
+    # Member QR codes carry "MemberID|Name|Class", so a student may fetch
+    # only their own, plus the digital items' QR codes (which only point at
+    # an item). Staff and viewers see them all. 404 rather than 403, so the
+    # answer does not reveal which member ids exist.
+    if folder.startswith("qrcodes/") and current_user.role not in ("admin", "librarian", "viewer"):
+        key = f"uploads/{subpath}"
+        own = (current_user.member_id is not None
+               and Member.query.filter_by(id=current_user.member_id, qr_path=key).first() is not None)
+        if not own and OnlineBook.query.filter_by(qr_path=key).first() is None:
+            abort(404)
     return _send_stored(f"uploads/{subpath}")
 
 
