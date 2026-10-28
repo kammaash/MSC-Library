@@ -271,6 +271,30 @@ def _apply_proxy_fix(flask_app, env) -> bool:
 
 _apply_proxy_fix(app, os.environ)
 
+
+def _check_proxy_settings(env, module_name):
+    """
+    Refuses to start an internet-facing deployment that would not see real
+    client addresses. On Render (gunicorn imports this module) every request
+    comes through Render's proxy; without LIBRARY_TRUST_PROXY=1 the app sees
+    the proxy's address for everyone, so the per-address sign-in counters
+    in security.py would treat the whole school as one client: a few wrong
+    passwords from anybody would lock everybody out, the admin included.
+    Running as `python app.py` (the VPS guide: waitress behind Nginx on the
+    same machine) is exempt, because waitress itself is told to trust the
+    local proxy there (see the bottom of this file).
+    """
+    if module_name == "__main__":
+        return
+    if env.get("LIBRARY_FORCE_HTTPS_COOKIES") == "1" and env.get("LIBRARY_TRUST_PROXY") != "1":
+        raise RuntimeError(
+            "LIBRARY_FORCE_HTTPS_COOKIES=1 is set but LIBRARY_TRUST_PROXY is not 1. Behind Render's "
+            "proxy every visitor would share one address and sign-in lockouts would hit the whole "
+            "school. Set LIBRARY_TRUST_PROXY=1 (see deploy/DEPLOY_TO_RENDER.md)."
+        )
+
+
+_check_proxy_settings(os.environ, __name__)
 app.config["SECRET_KEY"] = _get_or_create_secret_key()
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 # A LAN deployment (the normal case) is plain HTTP — forcing Secure

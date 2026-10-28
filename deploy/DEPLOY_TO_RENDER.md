@@ -450,5 +450,15 @@ permanent, commit the image to the repository as `static/images/logo_main.png`.
   (every push to `main` does this).
 - **Service will not start and logs mention R2 or Entra settings:** one of the
   all-or-nothing groups is only partly filled in.
+- **Service will not start and logs say `LIBRARY_TRUST_PROXY is not 1`:** set
+  `LIBRARY_TRUST_PROXY=1` in Render's environment. The app refuses to run
+  without it because every visitor would otherwise share Render's address.
+- **One wrong password locks everyone out, or "Too many failed sign-in
+  attempts" appears for people who never mistyped:** the app is seeing the
+  same address for every visitor. Check that `LIBRARY_TRUST_PROXY=1` is set
+  and that the Cloudflare DNS record for `library.msceducation.net` is
+  **DNS only** (grey cloud). An orange (proxied) record puts Cloudflare in
+  front of Render as a second proxy, and the app then sees Cloudflare's
+  address instead of the student's.
 - **Need an old error message:** Render keeps logs for 7 days on the
   Hobby/Free workspace; copy an error out promptly.
