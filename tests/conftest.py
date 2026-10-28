@@ -50,7 +50,26 @@ def app_module():
     assert os.environ["LIBRARY_DATA_DIR"] in app.DB_PATH, (
         f"tests would run against a real database: {app.DB_PATH}"
     )
+    _enforce_sqlite_foreign_keys()
+    # Importing app already opened pooled connections without the setting;
+    # discard them so every connection from here on is created with it.
+    with app.app.app_context():
+        app.db.engine.dispose()
     return app
+
+
+def _enforce_sqlite_foreign_keys():
+    """SQLite ignores foreign keys unless asked to; Postgres (production)
+    always enforces them. Turning enforcement on for every connection the
+    tests open means a delete that would fail on Postgres fails here too."""
+    import sqlite3
+    from sqlalchemy import event
+    from sqlalchemy.engine import Engine
+
+    @event.listens_for(Engine, "connect")
+    def _fk_on(dbapi_connection, _record):
+        if isinstance(dbapi_connection, sqlite3.Connection):
+            dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
 
 @pytest.fixture(autouse=True)

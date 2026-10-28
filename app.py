@@ -1483,8 +1483,21 @@ def delete_member(mid):
     member = Member.query.get_or_404(mid)
     if Issue.query.filter_by(member_id=member.member_id, status="Active").first():
         return jsonify({"error": "Cannot delete — member has an active loan."}), 400
+    # Postgres enforces foreign keys (SQLite does not), so everything that
+    # points at this member has to go, or be unlinked, before the member row.
+    # A student's own sign-in account goes with them; any other kind of
+    # account (a staff login that was linked to a member) is kept, just
+    # unlinked. Loans, fines, lost-book and certificate records are library
+    # history and are deliberately kept.
+    User.query.filter_by(member_id=member.id, role="student").delete(synchronize_session=False)
+    User.query.filter_by(member_id=member.id).update({"member_id": None}, synchronize_session=False)
+    for model in (Bookmark, Favorite, ReadHistory, DigitalLibraryVisit, PinResetRequest):
+        model.query.filter_by(member_id=member.member_id).delete(synchronize_session=False)
+    qr_key = member.qr_path
     db.session.delete(member)
     db.session.commit()
+    # Only now is it safe to drop the file: the record that named it is gone.
+    storage.delete(qr_key)
     return jsonify({"ok": True})
 
 
@@ -2317,6 +2330,10 @@ def delete_online_book(book_id):
     book = OnlineBook.query.get_or_404(book_id)
     # Copy the keys first: once the row is deleted the book object is detached.
     keys = (book.pdf_path, book.preview_pdf_path, book.qr_path)
+    # Students' bookmarks, favourites and reading history point at the book;
+    # Postgres refuses to delete it while they exist (SQLite does not check).
+    for model in (Bookmark, Favorite, ReadHistory):
+        model.query.filter_by(online_book_id=book.id).delete(synchronize_session=False)
     db.session.delete(book)
     db.session.commit()
     for key in keys:

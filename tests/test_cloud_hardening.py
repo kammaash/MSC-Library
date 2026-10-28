@@ -180,3 +180,114 @@ def test_link_with_unusable_key_is_a_json_404(client, r2, app_module):
 def test_backup_folder_variants_are_not_served(client, app_module, path):
     login_as(client, make_admin())
     assert client.get("/uploads/" + path).status_code == 404
+
+
+# ---- deletes must satisfy foreign keys (Postgres enforces them) ----
+def test_sqlite_foreign_keys_are_enforced_in_tests(app_module):
+    from models import db
+    from sqlalchemy import text
+    with app_module.app.app_context():
+        assert db.session.execute(text("PRAGMA foreign_keys")).scalar() == 1
+
+
+def _engagement(member, book_id):
+    """Bookmark, favourite, reading history, visit and PIN request for a student."""
+    from conftest import _persist
+    from models import (Bookmark, Favorite, ReadHistory, DigitalLibraryVisit,
+                        PinResetRequest, Certificate)
+    mid = member.member_id
+    _persist(Bookmark(member_id=mid, online_book_id=book_id, added_date="2026-01-01"))
+    _persist(Favorite(member_id=mid, online_book_id=book_id, added_date="2026-01-01"))
+    _persist(ReadHistory(member_id=mid, online_book_id=book_id, open_count=1))
+    _persist(DigitalLibraryVisit(member_id=mid, visit_date="2026-01-01"))
+    _persist(PinResetRequest(member_id=mid, status="Pending"))
+    _persist(Certificate(member_id=mid, title="Top Reader"))
+
+
+def _count(app_module, model, **filters):
+    with app_module.app.app_context():
+        return model.query.filter_by(**filters).count()
+
+
+def test_delete_online_book_with_student_activity(client, app_module, sample_book):
+    from models import Bookmark, Favorite, ReadHistory, OnlineBook
+    student = make_student()
+    _engagement(student, sample_book.id)
+    login_as(client, make_admin())
+    r = client.delete(f"/api/online-books/{sample_book.id}")
+    assert r.status_code == 200
+    assert _count(app_module, OnlineBook) == 0
+    for model in (Bookmark, Favorite, ReadHistory):
+        assert _count(app_module, model, online_book_id=sample_book.id) == 0
+
+
+def test_delete_student_who_has_logged_in_and_has_history(client, app_module, sample_book):
+    from conftest import _persist
+    from models import (User, Member, Issue, Book, Bookmark, Favorite, ReadHistory,
+                        DigitalLibraryVisit, PinResetRequest, Certificate)
+    student = make_student()
+    other = make_student(admission_no="A200")
+    student_user(student)
+    other_user = student_user(other)
+    _engagement(student, sample_book.id)
+    _engagement(other, sample_book.id)
+    book = _persist(Book(title="B", accession_no="ACC1", copies=1))
+    _persist(Issue(accession_no=book.accession_no, member_id=student.member_id, issue_date="2026-01-01",
+                   due_date="2026-01-15", return_date="2026-01-10", status="Returned"))
+    login_as(client, make_admin())
+
+    r = client.delete(f"/api/members/{student.id}")
+    assert r.status_code == 200, r.get_data(as_text=True)
+
+    assert _count(app_module, Member, id=student.id) == 0
+    assert _count(app_module, User, member_id=student.id) == 0
+    for model in (Bookmark, Favorite, ReadHistory, DigitalLibraryVisit, PinResetRequest):
+        assert _count(app_module, model, member_id=student.member_id) == 0
+    # Library history is kept, and another student's records are untouched.
+    assert _count(app_module, Issue, member_id=student.member_id) == 1
+    assert _count(app_module, Certificate, member_id=student.member_id) == 1
+    assert _count(app_module, User, id=other_user.id) == 1
+    for model in (Bookmark, Favorite, ReadHistory, DigitalLibraryVisit, PinResetRequest):
+        assert _count(app_module, model, member_id=other.member_id) == 1
+
+
+def test_delete_member_keeps_non_student_user_but_unlinks_it(client, app_module):
+    from conftest import _persist
+    from models import User
+    member = make_student(admission_no="S1")
+    staff_user = _persist(User(username="teacher", password_hash="x", name="T",
+                               role="librarian", member_id=member.id))
+    login_as(client, make_admin())
+    assert client.delete(f"/api/members/{member.id}").status_code == 200
+    with app_module.app.app_context():
+        row = User.query.get(staff_user.id)
+        assert row is not None and row.member_id is None
+
+
+def test_delete_member_with_active_loan_is_still_refused(client, app_module):
+    from conftest import _persist
+    from models import Book, Issue, Member
+    member = make_student()
+    book = _persist(Book(title="B", accession_no="ACC1", copies=1))
+    _persist(Issue(accession_no=book.accession_no, member_id=member.member_id, issue_date="2026-01-01",
+                   due_date="2026-01-15", status="Active"))
+    login_as(client, make_admin())
+    r = client.delete(f"/api/members/{member.id}")
+    assert r.status_code == 400
+    assert _count(app_module, Member, id=member.id) == 1
+
+
+def test_delete_member_removes_their_qr_file(client, app_module):
+    import os
+    member = make_student(admission_no="Q1")
+    key = "uploads/qrcodes/q1.png"
+    path = app_module.storage.local_path(key)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "wb").write(b"png")
+    from models import Member, db
+    with app_module.app.app_context():
+        db.session.get(Member, member.id).qr_path = key
+        db.session.commit()
+    login_as(client, make_admin())
+    assert client.delete(f"/api/members/{member.id}").status_code == 200
+    assert not os.path.exists(path)
