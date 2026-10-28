@@ -981,11 +981,11 @@ document.getElementById('onlineGrid').addEventListener('click', e => {
 });
 
 async function openMediaViewerAndTrackPoints(id, type, title) {
-  if (!IS_STUDENT) { openMediaViewer(id, type, title); return; }
+  if (!IS_STUDENT) { await openMediaViewer(id, type, title); return; }
   let before = 0;
   try { before = (await api('/api/student/points')).points; } catch (e) { /* non-fatal */ }
-  openMediaViewer(id, type, title);
-  // The read gets logged server-side as a side effect of the /view request
+  await openMediaViewer(id, type, title);
+  // The read gets logged server-side as a side effect of the /link request
   // the viewer just made; give it a moment to land, then check whether
   // points actually went up (first read of this item, not a re-read).
   setTimeout(async () => {
@@ -996,22 +996,152 @@ async function openMediaViewerAndTrackPoints(id, type, title) {
   }, 1200);
 }
 
-function openMediaViewer(id, type, title) {
-  const wrap = document.querySelector('#pdfViewerOverlay .pdf-frame-wrap');
-  const url = `/api/online-books/${id}/view`;
+/* ---------- media viewer ----------
+   The viewer asks /link for the URL to show rather than building a /view URL
+   itself. On the cloud deployment that URL is a short-lived presigned link;
+   for video/audio the viewer warns shortly before it stops working and lets
+   the student renew it ("Need more time") without losing their place. With
+   local storage the link never expires and none of the timer code runs.
+   All viewer state lives at module level so closeMediaViewer() can reliably
+   cancel anything still pending. */
+const TIMED_MEDIA_TYPES = ['mp4', 'webm', 'mp3', 'wav', 'm4a'];
+const PROGRESS_INTERVAL_MS = 15000;
+let viewerSession = 0;        // bumped on every open/close; stale async work checks it
+let viewerWarnTimer = null;   // fires when the "Need more time" bar is due
+let viewerBookId = null;
+let viewerMedia = null;       // the <video>/<audio> element, if any
+let viewerLastProgressSent = 0;
 
+// fetch() directly (not api()) because the caller needs the status code:
+// a 401 means "signed out", which is a prompt rather than an error toast.
+async function fetchViewerLink(id, renew) {
+  const res = await fetch(`/api/online-books/${id}/link${renew ? '?renew=1' : ''}`, { cache: 'no-store' });
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* non-json */ }
+  return { ok: res.ok, status: res.status, data };
+}
+
+function sendViewerProgress(final) {
+  // Staff have no reading history, and 0 s means nothing was watched yet.
+  if (!IS_STUDENT || !viewerMedia || viewerBookId == null) return;
+  const seconds = Math.floor(viewerMedia.currentTime || 0);
+  if (seconds <= 0) return;
+  viewerLastProgressSent = Date.now();
+  // Fire and forget: losing one progress update must never disturb playback.
+  // keepalive lets the request finish even as the page tears the viewer down.
+  api(`/api/online-books/${viewerBookId}/progress`, {
+    method: 'POST', body: JSON.stringify({ seconds }), keepalive: !!final
+  }).catch(() => {});
+}
+
+function renewBarMessage(link) {
+  const left = link.expires_in - link.warn_at;
+  if (left >= 300) return 'Your access ends in 5 minutes.';
+  const mins = Math.max(1, Math.ceil(left / 60));
+  return `Your access ends in ${mins} ${mins === 1 ? 'minute' : 'minutes'}.`;
+}
+
+function scheduleRenewWarning(link, session) {
+  clearTimeout(viewerWarnTimer);
+  if (link.expires_in == null || link.warn_at == null) return;
+  viewerWarnTimer = setTimeout(() => {
+    if (session !== viewerSession) return;
+    showRenewBar(link, session);
+  }, link.warn_at * 1000);
+}
+
+function hideRenewBar() {
+  const bar = document.getElementById('renewBar');
+  if (bar) bar.remove();
+}
+
+function showRenewBar(link, session) {
+  hideRenewBar();
+  const wrap = document.querySelector('#pdfViewerOverlay .pdf-frame-wrap');
+  const header = wrap.querySelector('.pdf-bar');
+  const bar = document.createElement('div');
+  bar.className = 'renew-bar';
+  bar.id = 'renewBar';
+  bar.setAttribute('role', 'status');
+  bar.innerHTML = `<span id="renewMsg">${escapeHtml(renewBarMessage(link))}</span>
+    <button type="button" id="renewLinkBtn">Need more time</button>`;
+  header.insertAdjacentElement('afterend', bar);
+  document.getElementById('renewLinkBtn').addEventListener('click', () => renewViewerLink(session));
+}
+
+async function renewViewerLink(session) {
+  const btn = document.getElementById('renewLinkBtn');
+  const msg = document.getElementById('renewMsg');
+  if (!btn || !msg) return;
+  btn.disabled = true;
+  let result;
+  try {
+    result = await fetchViewerLink(viewerBookId, true);
+  } catch (e) {
+    result = { ok: false, status: 0, data: null };
+  }
+  if (session !== viewerSession) return;   // viewer was closed meanwhile
+  if (result.ok) {
+    const media = viewerMedia;
+    // Swapping src restarts the element, so remember the place and restore it.
+    const resumeAt = media.currentTime;
+    const wasPaused = media.paused;
+    media.addEventListener('loadedmetadata', () => {
+      media.currentTime = resumeAt;
+      if (!wasPaused) media.play().catch(() => {});
+    }, { once: true });
+    media.src = result.data.url;
+    if (wasPaused) media.pause();
+    hideRenewBar();
+    scheduleRenewWarning(result.data, session);
+  } else if (result.status === 401) {
+    msg.innerHTML = 'You\'ve been signed out. <a href="/login" target="_blank" rel="noopener">Sign in again</a> to continue.';
+    btn.remove();
+  } else {
+    msg.textContent = 'Could not renew right now. Please try again.';
+    btn.disabled = false;
+  }
+}
+
+async function openMediaViewer(id, type, title) {
+  const wrap = document.querySelector('#pdfViewerOverlay .pdf-frame-wrap');
+  // A previous viewer may still be open (or its timers pending).
+  closeMediaViewer();
+  const session = viewerSession;
+
+  let result;
+  try {
+    result = await fetchViewerLink(id, false);
+  } catch (e) {
+    toast('Could not open this item. Check your connection and try again.', true);
+    return;
+  }
+  if (session !== viewerSession) return;
+  if (!result.ok) {
+    toast((result.data && result.data.error) || 'Could not open this item.', true);
+    return;
+  }
+  const link = result.data;
+  const url = link.url;
+  // The link reports what is actually served (a Word/PowerPoint file with a
+  // generated PDF preview is served as pdf); fall back to the caller's type.
+  type = link.file_type || type;
+
+  let media = null;
   if (type === 'pdf') {
     wrap.innerHTML = `<div class="pdf-bar"><span id="pdfTitle">${escapeHtml(title)}</span><button class="ghost" id="closePdfBtn">✕ Close</button></div>
       <iframe id="pdfFrame" src="${url}#toolbar=0&navpanes=0"></iframe>`;
   } else if (['mp4', 'webm'].includes(type)) {
     wrap.innerHTML = `<div class="pdf-bar"><span>${escapeHtml(title)}</span><button class="ghost" id="closePdfBtn">✕ Close</button></div>
       <video src="${url}" controls autoplay controlsList="nodownload noremoteplayback" disablePictureInPicture oncontextmenu="return false;" style="width:100%; max-height:80vh; background:#000; border-radius:6px;"></video>`;
+    media = wrap.querySelector('video');
   } else if (['mp3', 'wav', 'm4a'].includes(type)) {
     wrap.innerHTML = `<div class="pdf-bar"><span>${escapeHtml(title)}</span><button class="ghost" id="closePdfBtn">✕ Close</button></div>
       <div style="background:var(--parchment); border-radius:8px; padding:40px 20px; text-align:center;">
         <div style="font-size:48px; margin-bottom:12px;">🎧</div>
         <audio src="${url}" controls autoplay controlsList="nodownload" oncontextmenu="return false;" style="width:100%;"></audio>
       </div>`;
+    media = wrap.querySelector('audio');
   } else if (type === 'epub') {
     wrap.innerHTML = `<div class="pdf-bar"><span>${escapeHtml(title)}</span><button class="ghost" id="closePdfBtn">✕ Close</button></div>
       <div id="epubArea" style="flex:1; background:#fff; border-radius:6px;"></div>`;
@@ -1021,11 +1151,33 @@ function openMediaViewer(id, type, title) {
     window.location.href = url;
     return;
   }
+
+  if (media) {
+    viewerBookId = id;
+    viewerMedia = media;
+    viewerLastProgressSent = Date.now();
+    // Resume where the student left off, unless they were basically done
+    // or had only just started.
+    media.addEventListener('loadedmetadata', () => {
+      const p = link.progress_seconds || 0;
+      if (p > 5 && (!isFinite(media.duration) || p < media.duration - 5)) media.currentTime = p;
+    }, { once: true });
+    media.addEventListener('timeupdate', () => {
+      if (Date.now() - viewerLastProgressSent >= PROGRESS_INTERVAL_MS) sendViewerProgress(false);
+    });
+    if (TIMED_MEDIA_TYPES.includes(type)) scheduleRenewWarning(link, session);
+  }
   document.getElementById('closePdfBtn').addEventListener('click', closeMediaViewer);
   document.getElementById('pdfViewerOverlay').classList.add('show');
 }
 
 function closeMediaViewer() {
+  sendViewerProgress(true);
+  viewerSession++;
+  clearTimeout(viewerWarnTimer);
+  viewerWarnTimer = null;
+  viewerMedia = null;
+  viewerBookId = null;
   document.getElementById('pdfViewerOverlay').classList.remove('show');
   document.querySelector('#pdfViewerOverlay .pdf-frame-wrap').innerHTML = '';
 }

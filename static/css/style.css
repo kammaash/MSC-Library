@@ -441,6 +441,21 @@ form input, form select { width: 100%; }
   box-shadow: 0 2px 8px rgba(0,0,0,0.4);
 }
 .pdf-bar button:hover { background: var(--navy) !important; }
+/* "Need more time" bar: sits between the title bar and the media (not over it),
+   so it never covers the player's own controls. */
+.renew-bar {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+  background: var(--parchment); color: var(--navy-deep);
+  border: 1px solid var(--brass); border-left: 5px solid var(--brass);
+  border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; font-size: 14px; font-weight: 600;
+}
+.renew-bar a { color: var(--brass); text-decoration: underline; }
+.renew-bar button {
+  background: linear-gradient(180deg, var(--brass-light), var(--brass));
+  color: var(--white); border: 1px solid var(--brass); border-radius: 6px;
+  padding: 6px 14px; font-weight: 700; cursor: pointer;
+}
+.renew-bar button:disabled { opacity: 0.6; cursor: default; }
 #pdfFrame { flex: 1; width: 100%; border: none; border-radius: 6px; background: var(--white); }
 
 /* ---------- footer ---------- */
