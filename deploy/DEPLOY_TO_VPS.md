@@ -156,14 +156,12 @@ good end-to-end check).
 
 ## Before you go live for real students — read this
 
-1. **Do the student PIN rollout first, on this server, before telling
-   students the address.** Every student needs to log in once (an
-   admin/librarian can do this for the whole class in one sitting, or
-   have students do it under supervision) to set their PIN *before*
-   the address is shared publicly. See `CHANGES_README.md` for why —
-   the short version is that a student with no PIN yet is claimable by
-   anyone who knows their admission number and birthday, which is only
-   safe while nobody outside school knows the address yet.
+1. **Hand out PIN set-up codes before telling students the address.**
+   A student can only create a PIN with a one-time set-up code from the
+   librarian (Members → **Issue PIN set-up codes** for a whole class, or
+   **Issue code** on one card). The codes show in the member list's PIN
+   column; print or copy them per class and hand them out in person.
+   Students who already set a PIN are unaffected.
 2. **Get the HTTPS certificate (step 6, `certbot`) before you ever set
    `LIBRARY_FORCE_HTTPS_COOKIES=1` and restart the service.** Once that
    flag is on, the app itself redirects every plain-HTTP request to

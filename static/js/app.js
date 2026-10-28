@@ -437,18 +437,51 @@ async function loadMembers() {
       <td>${escapeHtml(m.class_dept || '')}</td>
       <td>${escapeHtml(m.admission_no || '—')}</td>
       <td>${m.dob ? isoToDDMMYYYY(m.dob) : '—'}</td>
-      <td>${m.type === 'Student' ? (m.pin_set ? 'Set' : '—') : '—'}</td>
+      <td>${memberPinCell(m)}</td>
       <td>${m.active_loans}</td>
       <td>${m.qr_path ? `<a href="/${m.qr_path}" target="_blank">View</a>` : '—'}</td>
       <td>
         <button class="ghost" data-edit-member="${m.id}">Edit</button>
-        ${IS_STAFF && m.type === 'Student' && m.pin_set ? `<button class="ghost" data-reset-pin="${m.id}" title="Clear this student's PIN — they'll set a new one on next login">Reset PIN</button>` : ''}
+        ${IS_STAFF && m.type === 'Student' && m.pin_set ? `<button class="ghost" data-reset-pin="${m.id}" title="Clear this student's PIN and issue a set-up code for a new one">Reset PIN</button>` : ''}
+        ${IS_STAFF && m.type === 'Student' && !m.pin_set ? `<button class="ghost" data-issue-code="${m.id}" title="Give the student a one-time code to create their PIN">${m.pin_setup_code ? 'New code' : 'Issue code'}</button>` : ''}
+        ${IS_STAFF && m.signin_locked ? `<button class="ghost" data-unlock-member="${m.id}" title="Allow this student to sign in again">Unlock</button>` : ''}
         <button class="danger" data-del-member="${m.id}">Remove</button>
       </td>
     </tr>`).join('') || `<tr><td colspan="9" style="text-align:center;color:#9a9180;padding:20px;">No members yet.</td></tr>`;
   refreshPinRequestsBadge();
 }
 document.getElementById('memberSearch').addEventListener('input', loadMembers);
+
+// PIN column: a student's PIN status, the set-up code waiting to be handed
+// over (staff only receive it), and whether sign-in is locked.
+function memberPinCell(m) {
+  if (m.type !== 'Student') return '—';
+  let cell = m.pin_set ? 'Set'
+    : m.pin_setup_code ? `Code: <strong>${escapeHtml(m.pin_setup_code)}</strong>`
+    : '—';
+  if (m.signin_locked) cell += ' <span class="tag Lost">Locked</span>';
+  return cell;
+}
+
+function showSetupCode(code, intro) {
+  showModal(`
+    <h3>PIN set-up code</h3>
+    <p class="login-hint" style="margin-top:0;">${escapeHtml(intro)}</p>
+    <p style="font-size:28px; letter-spacing:4px; text-align:center;"><strong>${escapeHtml(code)}</strong></p>
+    <p class="login-hint">Give this code to the student in person. They sign in with their admission number and date of birth, enter the code, and choose a new PIN. The code also stays visible in the member list until it is used.</p>
+  `);
+}
+
+document.getElementById('issueCodesBtn')?.addEventListener('click', async () => {
+  const cls = prompt('Issue set-up codes to every student who has no PIN and no code yet.\n\nClass/Dept to limit it to (leave blank for the whole school):');
+  if (cls === null) return;
+  try {
+    const result = await api('/api/members/pin-codes', { method: 'POST', body: JSON.stringify({ class_dept: cls.trim() }) });
+    toast(`${result.issued} set-up code${result.issued !== 1 ? 's' : ''} issued. They are shown in the PIN column.`);
+    loadMembers();
+  } catch (err) { toast(err.message, true); }
+});
+if (!IS_STAFF) document.getElementById('issueCodesBtn')?.remove();
 
 /* ---------- "Forgot PIN" requests waiting for admin/librarian approval ---------- */
 async function refreshPinRequestsBadge() {
@@ -481,7 +514,7 @@ document.getElementById('pinRequestsBadge')?.addEventListener('click', async () 
       </tr>`).join('') || `<tr><td colspan="5" style="text-align:center;color:#9a9180;padding:20px;">No pending requests.</td></tr>`;
     showModal(`
       <h3>PIN Reset Requests</h3>
-      <p class="login-hint" style="margin-top:0;">Only approve once you've verified who's asking (in person, or by calling the parent number on file) — approving clears their PIN and they'll set a new one on next login.</p>
+      <p class="login-hint" style="margin-top:0;">Only approve once you've verified who's asking (in person, or by calling the parent number on file) — approving clears their PIN and gives you a set-up code to hand them for creating a new one.</p>
       <div class="table-wrap"><table>
         <thead><tr><th>Name</th><th>Class/Dept</th><th>Admission No.</th><th>Requested</th><th></th></tr></thead>
         <tbody id="pinReqBody">${rows}</tbody>
@@ -492,9 +525,9 @@ document.getElementById('pinRequestsBadge')?.addEventListener('click', async () 
       const denyId = e.target.getAttribute('data-deny-pin-req');
       if (approveId) {
         try {
-          await api(`/api/pin-reset-requests/${approveId}/approve`, { method: 'POST' });
-          toast('PIN cleared — student can set a new one on next login.');
+          const result = await api(`/api/pin-reset-requests/${approveId}/approve`, { method: 'POST' });
           closeModal(); refreshPinRequestsBadge(); loadMembers();
+          showSetupCode(result.pin_setup_code, 'PIN cleared.');
         } catch (err) { toast(err.message, true); }
       }
       if (denyId) {
@@ -594,10 +627,26 @@ document.getElementById('membersBody').addEventListener('click', async e => {
   }
   const resetPinId = e.target.getAttribute('data-reset-pin');
   if (resetPinId) {
-    if (!confirm("Clear this student's PIN? Only do this once you've actually verified who's asking — they'll be prompted to create a new PIN the next time they log in.")) return;
+    if (!confirm("Clear this student's PIN? Only do this once you've actually verified who's asking — you'll get a set-up code to give them for creating a new PIN.")) return;
     try {
-      await api(`/api/members/${resetPinId}/reset-pin`, { method: 'POST' });
-      toast('PIN cleared. The student will set a new one on next login.');
+      const result = await api(`/api/members/${resetPinId}/reset-pin`, { method: 'POST' });
+      loadMembers();
+      showSetupCode(result.pin_setup_code, 'PIN cleared.');
+    } catch (err) { toast(err.message, true); }
+  }
+  const issueCodeId = e.target.getAttribute('data-issue-code');
+  if (issueCodeId) {
+    try {
+      const result = await api(`/api/members/${issueCodeId}/pin-code`, { method: 'POST' });
+      loadMembers();
+      showSetupCode(result.pin_setup_code, 'Any earlier code for this student no longer works.');
+    } catch (err) { toast(err.message, true); }
+  }
+  const unlockId = e.target.getAttribute('data-unlock-member');
+  if (unlockId) {
+    try {
+      await api(`/api/members/${unlockId}/unlock`, { method: 'POST' });
+      toast('Sign-in unlocked.');
       loadMembers();
     } catch (err) { toast(err.message, true); }
   }

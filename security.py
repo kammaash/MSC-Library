@@ -220,8 +220,42 @@ def password_is_strong_enough(pw):
 # back "5" instead of one of them seeing the other's update — note this
 # only coordinates threads within one process; see the module docstring
 # for the multi-process caveat under gunicorn.
+#
+# Three counters share that table, because a lock keyed only on
+# (IP, username) has two holes on an internet-facing login page: from one
+# address an attacker can try one date of birth against every admission
+# number in the school and never trip a lock, and from many addresses one
+# student can be attacked indefinitely. So every failed attempt counts
+# against all three of:
+#
+#   - the (IP, username) pair: 5 failures in 15 minutes -> 15-minute lock.
+#     This is what a student mistyping their own PIN normally runs into.
+#   - the account itself, whatever address the attempts come from:
+#     10 failures in an hour -> locked. A student's card then stays locked
+#     until a librarian unlocks it from the member list (or issues a new
+#     PIN set-up code); a staff account locks for an hour instead, because
+#     a lock that waits for someone to lift it could leave the school with
+#     no admin able to sign in at all. Only accounts that exist
+#     are counted, so random usernames do not fill the table.
+#   - the client address across all usernames: 40 failures in 15 minutes
+#     -> 15-minute lock. Only failures count, never successful sign-ins,
+#     and the number is deliberately generous: a whole computer lab
+#     reaches a cloud deployment through one school NAT address, and a
+#     class of young students mistyping dates of birth must not lock
+#     everyone else out.
 MAX_ATTEMPTS = 5
 LOCKOUT_SECONDS = 15 * 60  # 15 minutes
+
+ACCOUNT_MAX_FAILURES = 10
+ACCOUNT_WINDOW_SECONDS = 60 * 60
+STAFF_ACCOUNT_LOCK_SECONDS = 60 * 60
+
+IP_MAX_FAILURES = 40
+IP_WINDOW_SECONDS = 15 * 60
+IP_LOCK_SECONDS = 15 * 60
+
+# Stored in locked_until for a lock that only a librarian can lift.
+UNTIL_CLEARED = -1.0
 
 _lock = threading.Lock()
 
@@ -230,86 +264,146 @@ def _key(ip, username):
     return f"{ip}|{(username or '').strip().lower()}"
 
 
-def is_locked_out(db_path, ip, username):
-    key = _key(ip, username)
-    now = time.time()
-    with _lock:
-        conn = _get_connection(db_path)
-        try:
-            row = _exec(
-                conn,
-                "SELECT fail_count, window_start, locked_until FROM login_rate_limits WHERE rate_key = ?",
-                (key,),
-            ).fetchone()
-            if not row:
-                return False, 0
-            fail_count, window_start, locked_until = row
-            if locked_until and now < locked_until:
-                return True, int(locked_until - now)
-            if locked_until and now >= locked_until:
-                # Lock has expired — clear the record so the next failed
-                # attempt starts a fresh window instead of instantly
-                # re-locking on the old count.
-                _exec(conn, "DELETE FROM login_rate_limits WHERE rate_key = ?", (key,))
-                conn.commit()
-            return False, 0
-        finally:
-            conn.close()
+def _account_key(account):
+    return f"account|{(account or '').strip().lower()}"
 
 
-def record_failed_attempt(db_path, ip, username):
-    key = _key(ip, username)
-    now = time.time()
-    with _lock:
-        conn = _get_connection(db_path)
-        try:
-            row = _exec(
-                conn, "SELECT fail_count, window_start FROM login_rate_limits WHERE rate_key = ?", (key,)
-            ).fetchone()
-            if row and (now - row[1]) < LOCKOUT_SECONDS:
-                fail_count = row[0] + 1
-                window_start = row[1]
-            else:
-                fail_count = 1
-                window_start = now
-            locked_until = (now + LOCKOUT_SECONDS) if fail_count >= MAX_ATTEMPTS else None
-            _exec(
-                conn,
-                "INSERT INTO login_rate_limits (rate_key, fail_count, window_start, locked_until) "
-                "VALUES (?, ?, ?, ?) ON CONFLICT(rate_key) DO UPDATE SET "
-                "fail_count = excluded.fail_count, window_start = excluded.window_start, "
-                "locked_until = excluded.locked_until",
-                (key, fail_count, window_start, locked_until),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+def _ip_key(ip):
+    return f"ip|{ip}"
 
 
-def _get_fail_count(db_path, ip, username):
+def _lock_remaining(locked_until, now):
+    """None when not locked, 0 for a lock that waits for a librarian,
+    otherwise the seconds left."""
+    if locked_until is None:
+        return None
+    if locked_until == UNTIL_CLEARED:
+        return 0
+    if now < locked_until:
+        return max(1, int(locked_until - now))
+    return None
+
+
+def login_block(db_path, ip, pair_name, account):
     """
-    Read-only lookup of the current fail_count for a key, purely so the
-    login route can tell a student how many attempts they have left
-    before a lock — doesn't record anything itself (record_failed_attempt
-    already did that just before this is called).
+    Checks the three counters for a sign-in attempt, in one connection.
+    `pair_name` names the (IP, username) counter (e.g. "student:A100" for a
+    login, "pinreq:A100" for a PIN reset request); `account` names the
+    account counter shared by every route that guesses at that account.
+
+    Returns None when the attempt may go ahead, otherwise (reason, seconds)
+    where reason is "pair", "account" or "ip" and seconds is how long the
+    lock has left, or None for a lock that waits for a librarian.
     """
-    key = _key(ip, username)
+    now = time.time()
+    checks = ((_key(ip, pair_name), "pair"), (_account_key(account), "account"), (_ip_key(ip), "ip"))
     conn = _get_connection(db_path)
     try:
-        row = _exec(
-            conn, "SELECT fail_count FROM login_rate_limits WHERE rate_key = ?", (key,)
-        ).fetchone()
-        return row[0] if row else 0
+        for key, reason in checks:
+            row = _exec(conn, "SELECT locked_until FROM login_rate_limits WHERE rate_key = ?",
+                        (key,)).fetchone()
+            remaining = _lock_remaining(row[0], now) if row else None
+            if remaining is not None:
+                return reason, (remaining or None)
+        return None
     finally:
         conn.close()
 
 
-def clear_attempts(db_path, ip, username):
-    key = _key(ip, username)
+def _count_failure(conn, key, now, max_failures, window_seconds, lock_seconds):
+    """Adds one failure to a counter and returns the new count. A lock that
+    has expired, or a window that has run out, starts a fresh count.
+    lock_seconds=None locks until clear_account_lock() is called."""
+    row = _exec(
+        conn, "SELECT fail_count, window_start, locked_until FROM login_rate_limits WHERE rate_key = ?",
+        (key,),
+    ).fetchone()
+    if row and row[2] == UNTIL_CLEARED:
+        return row[0]
+    if row and row[2] is None and (now - row[1]) < window_seconds:
+        fail_count, window_start = row[0] + 1, row[1]
+    else:
+        fail_count, window_start = 1, now
+    locked_until = None
+    if fail_count >= max_failures:
+        locked_until = UNTIL_CLEARED if lock_seconds is None else now + lock_seconds
+    _exec(
+        conn,
+        "INSERT INTO login_rate_limits (rate_key, fail_count, window_start, locked_until) "
+        "VALUES (?, ?, ?, ?) ON CONFLICT(rate_key) DO UPDATE SET "
+        "fail_count = excluded.fail_count, window_start = excluded.window_start, "
+        "locked_until = excluded.locked_until",
+        (key, fail_count, window_start, locked_until),
+    )
+    return fail_count
+
+
+def record_login_failure(db_path, ip, pair_name, account, account_exists=True,
+                         account_lock_seconds=None):
+    """
+    Counts one failed attempt against all three counters (the account one
+    only when the account exists) and returns how many attempts are left
+    before the pair or the account locks, whichever comes first.
+    account_lock_seconds=None means a student-style lock that waits for a
+    librarian; staff accounts pass STAFF_ACCOUNT_LOCK_SECONDS.
+    """
+    now = time.time()
     with _lock:
         conn = _get_connection(db_path)
         try:
-            _exec(conn, "DELETE FROM login_rate_limits WHERE rate_key = ?", (key,))
+            pair_count = _count_failure(conn, _key(ip, pair_name), now,
+                                        MAX_ATTEMPTS, LOCKOUT_SECONDS, LOCKOUT_SECONDS)
+            remaining = MAX_ATTEMPTS - pair_count
+            if account_exists:
+                account_count = _count_failure(conn, _account_key(account), now, ACCOUNT_MAX_FAILURES,
+                                               ACCOUNT_WINDOW_SECONDS, account_lock_seconds)
+                remaining = min(remaining, ACCOUNT_MAX_FAILURES - account_count)
+            _count_failure(conn, _ip_key(ip), now, IP_MAX_FAILURES, IP_WINDOW_SECONDS, IP_LOCK_SECONDS)
+            conn.commit()
+            return max(0, remaining)
+        finally:
+            conn.close()
+
+
+def record_login_success(db_path, ip, pair_name, account):
+    """Resets the pair and account counters after a successful sign-in. The
+    per-address counter is left alone: otherwise an attacker could reset it
+    by signing in to their own account between guesses."""
+    with _lock:
+        conn = _get_connection(db_path)
+        try:
+            _exec(conn, "DELETE FROM login_rate_limits WHERE rate_key IN (?, ?)",
+                  (_key(ip, pair_name), _account_key(account)))
             conn.commit()
         finally:
             conn.close()
+
+
+def clear_account_lock(db_path, account):
+    """What the librarian's Unlock button does: forgets the account's
+    failures, including a lock that would otherwise never lift."""
+    with _lock:
+        conn = _get_connection(db_path)
+        try:
+            _exec(conn, "DELETE FROM login_rate_limits WHERE rate_key = ?", (_account_key(account),))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def locked_accounts(db_path):
+    """Names of the accounts currently locked (as passed to login_block),
+    for the member list's "Locked" marker."""
+    now = time.time()
+    conn = _get_connection(db_path)
+    try:
+        # The pattern is a parameter, not inline SQL: psycopg2 would read
+        # the "%" in a literal as a placeholder.
+        rows = _exec(
+            conn, "SELECT rate_key, locked_until FROM login_rate_limits "
+                  "WHERE rate_key LIKE ? AND locked_until IS NOT NULL",
+            ("account|%",),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {key[len("account|"):] for key, until in rows if _lock_remaining(until, now) is not None}

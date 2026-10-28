@@ -687,6 +687,41 @@ _MS_ERROR_MESSAGES = {
 }
 
 
+def _sign_in_blocked_response(client_ip, pair_name, account):
+    """The 429 for a sign-in attempt that a lock refuses, or None."""
+    blocked = security.login_block(DB_PATH, client_ip, pair_name, account)
+    if not blocked:
+        return None
+    reason, seconds = blocked
+    if seconds is None:
+        return jsonify({"error": "This library card is locked after too many failed sign-in attempts. "
+                                 "Please ask the librarian to unlock it."}), 429
+    minutes = max(1, seconds // 60)
+    return jsonify({
+        "error": f"Too many failed sign-in attempts. Please try again in about {minutes} minute(s)."
+    }), 429
+
+
+# Letters and digits that cannot be confused when read aloud or copied off
+# a slip of paper (no 0/O, 1/I/L).
+_SETUP_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+_SETUP_CODE_LENGTH = 6
+
+
+def _new_setup_code():
+    return "".join(secrets.choice(_SETUP_CODE_ALPHABET) for _ in range(_SETUP_CODE_LENGTH))
+
+
+def _normalize_setup_code(value):
+    """Uppercased, with the spaces and dashes people add when copying it."""
+    return re.sub(r"[\s-]", "", str(value or "")).upper()
+
+
+def _student_account(member):
+    """The account name the sign-in counters use for this student."""
+    return f"student:{member.admission_no or ''}"
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "GET":
@@ -697,7 +732,9 @@ def login():
         )
 
     data = request.get_json(silent=True) or request.form
-    role_mode = data.get("role_mode", "staff")  # staff | student
+    # Anything but "student" is the staff form. Normalised so the counter
+    # names below cannot be dodged by sending an invented role_mode.
+    role_mode = "student" if data.get("role_mode") == "student" else "staff"
     username = (data.get("username") or "").strip()
     password = (data.get("password") or "").strip()
     # Deliberately NOT trusting the X-Forwarded-For header here: this app
@@ -709,73 +746,80 @@ def login():
     # ProxyFix (see _apply_proxy_fix), which makes remote_addr the real client
     # IP taken from Render's own proxy hop rather than the proxy's address.
     client_ip = request.remote_addr or "unknown"
+    account = f"{role_mode}:{username}"
 
-    # Login throttling: after MAX_ATTEMPTS failed tries for this
-    # username+IP combination within the lockout window, further attempts
-    # are refused for a while — without this, a shared-network login form
-    # can be brute-forced with no limit at all.
-    locked, retry_seconds = security.is_locked_out(DB_PATH, client_ip, f"{role_mode}:{username}")
-    if locked:
-        minutes = max(1, retry_seconds // 60)
-        return jsonify({
-            "error": f"Too many failed sign-in attempts. Please try again in about {minutes} minute(s)."
-        }), 429
+    # Login throttling: three counters (this address + username, the
+    # account from any address, and this address across all usernames);
+    # see the comment above security.MAX_ATTEMPTS.
+    blocked = _sign_in_blocked_response(client_ip, account, account)
+    if blocked:
+        return blocked
 
     if role_mode == "student":
         member = Member.query.filter_by(admission_no=username, type="Student").first()
+
+        def failed(message, **extra):
+            remaining = security.record_login_failure(
+                DB_PATH, client_ip, account, account, account_exists=member is not None)
+            if extra and remaining > 0:
+                message += f" ({remaining} attempt{'s' if remaining != 1 else ''} left before sign-in is locked.)"
+            return jsonify({"error": message, "attempts_remaining": remaining, **extra}), 401
+
         if not member or not member.dob or ddmmyyyy_from_iso(member.dob) != password:
-            security.record_failed_attempt(DB_PATH, client_ip, f"{role_mode}:{username}")
-            return jsonify({"error": "Admission number or date of birth does not match any student."}), 401
+            return failed("Admission number or date of birth does not match any student.")
 
         # DOB alone identifies a child but isn't a real secret — it's
         # often semi-public (shared casually, on social media, guessable
         # alongside a sequential admission number). A PIN is required in
-        # addition to it, and every student is walked through creating
-        # one the first time they log in under this system.
+        # addition to it. Creating that PIN (the first time, or after a
+        # reset) needs a one-time set-up code the librarian hands over in
+        # person; otherwise whoever knew the DOB first could claim the card.
         if not member.pin_hash:
+            if not member.pin_setup_code:
+                return jsonify({"error": "Your library card needs a set-up code before you can sign in. "
+                                         "Please ask the librarian for one."}), 403
+            setup_code = _normalize_setup_code(data.get("setup_code"))
+            if not setup_code:
+                # DOB was correct; ask the frontend to show the set-up step.
+                return jsonify({"ok": False, "need_setup_code": True,
+                                "message": "First-time sign in — enter the set-up code from your "
+                                           "librarian and create a 4 to 6 digit PIN."}), 200
+            # Bytes, not str: compare_digest raises on non-ASCII text.
+            if not secrets.compare_digest(setup_code.encode(), member.pin_setup_code.encode()):
+                return failed("That set-up code is not right. Please check it with the librarian.",
+                              need_setup_code=True)
             new_pin = (data.get("new_pin") or "").strip()
             confirm_pin = (data.get("confirm_pin") or "").strip()
-            if not new_pin:
-                # DOB was correct, but this account has no PIN yet — tell
-                # the frontend to show the "create a PIN" step instead of
-                # logging in. Not a failed attempt: the DOB was right.
-                security.clear_attempts(DB_PATH, client_ip, f"{role_mode}:{username}")
-                return jsonify({"ok": False, "must_set_pin": True,
-                                 "message": "First-time login — please create a 4 to 6 digit PIN."}), 200
             if not new_pin.isdigit() or not (4 <= len(new_pin) <= 6):
-                return jsonify({"error": "PIN must be 4 to 6 digits."}), 400
+                return jsonify({"error": "PIN must be 4 to 6 digits.", "need_setup_code": True}), 400
             if new_pin != confirm_pin:
-                return jsonify({"error": "PIN and confirmation do not match."}), 400
+                return jsonify({"error": "PIN and confirmation do not match.", "need_setup_code": True}), 400
             member.pin_hash = generate_password_hash(new_pin)
+            member.pin_setup_code = None
             db.session.commit()
-            security.clear_attempts(DB_PATH, client_ip, f"{role_mode}:{username}")
         else:
             pin = (data.get("pin") or "").strip()
             if not pin:
                 # DOB was correct; ask the frontend to show the PIN box.
                 return jsonify({"ok": False, "need_pin": True, "message": "Please enter your PIN."}), 200
             if not check_password_hash(member.pin_hash, pin):
-                security.record_failed_attempt(DB_PATH, client_ip, f"{role_mode}:{username}")
                 # Tell the student how many tries are left before the
-                # 15-minute lock, and explicitly send need_pin back so
-                # the frontend knows to keep the PIN box open (not send
-                # them back to square one) and can clear the wrong PIN
-                # they just typed instead of leaving it sitting there.
-                remaining = max(0, security.MAX_ATTEMPTS - security._get_fail_count(DB_PATH, client_ip, f"{role_mode}:{username}"))
-                msg = "Incorrect PIN. Please try again."
-                if remaining > 0:
-                    msg += f" ({remaining} attempt{'s' if remaining != 1 else ''} left before a 15-minute lock.)"
-                return jsonify({"error": msg, "need_pin": True, "attempts_remaining": remaining}), 401
-            security.clear_attempts(DB_PATH, client_ip, f"{role_mode}:{username}")
+                # lock, and explicitly send need_pin back so the frontend
+                # knows to keep the PIN box open (not send them back to
+                # square one) and can clear the wrong PIN they just typed
+                # instead of leaving it sitting there.
+                return failed("Incorrect PIN. Please try again.", need_pin=True)
+        security.record_login_success(DB_PATH, client_ip, account, account)
 
         user = _finish_student_login(member)
         return jsonify({"ok": True, "user": {"name": user.name, "role": user.role}})
 
     user = User.query.filter_by(username=username).first()
     if not user or not check_password_hash(user.password_hash, password):
-        security.record_failed_attempt(DB_PATH, client_ip, f"{role_mode}:{username}")
+        security.record_login_failure(DB_PATH, client_ip, account, account, account_exists=user is not None,
+                                      account_lock_seconds=security.STAFF_ACCOUNT_LOCK_SECONDS)
         return jsonify({"error": "Invalid username or password."}), 401
-    security.clear_attempts(DB_PATH, client_ip, f"{role_mode}:{username}")
+    security.record_login_success(DB_PATH, client_ip, account, account)
     # Same session-fixation hygiene as the student path above.
     session.clear()
     login_user(user)
@@ -947,20 +991,22 @@ def request_pin_reset():
     username = (data.get("admission_no") or "").strip()
     dob_input = (data.get("dob") or "").strip()
     client_ip = request.remote_addr or "unknown"
+    # Its own (IP, username) counter, but the same account and per-address
+    # counters as /login: a DOB guessed here is a DOB guessed there.
+    pair_name, account = f"pinreq:{username}", f"student:{username}"
 
-    locked, retry_seconds = security.is_locked_out(DB_PATH, client_ip, f"pinreq:{username}")
-    if locked:
-        minutes = max(1, retry_seconds // 60)
-        return jsonify({"error": f"Too many attempts. Please try again in about {minutes} minute(s)."}), 429
+    blocked = _sign_in_blocked_response(client_ip, pair_name, account)
+    if blocked:
+        return blocked
 
     member = Member.query.filter_by(admission_no=username, type="Student").first()
     if not member or not member.dob or ddmmyyyy_from_iso(member.dob) != dob_input:
-        security.record_failed_attempt(DB_PATH, client_ip, f"pinreq:{username}")
+        security.record_login_failure(DB_PATH, client_ip, pair_name, account, account_exists=member is not None)
         return jsonify({"error": "Admission number or date of birth does not match any student."}), 401
-    security.clear_attempts(DB_PATH, client_ip, f"pinreq:{username}")
 
     if not member.pin_hash:
-        return jsonify({"error": "This account doesn't have a PIN set yet — just log in normally and you'll be asked to create one."}), 400
+        return jsonify({"error": "This card doesn't have a PIN yet — ask the librarian for a set-up code, "
+                                 "then sign in normally and you'll be asked to create one."}), 400
 
     existing = PinResetRequest.query.filter_by(member_id=member.member_id, status="Pending").first()
     if existing:
@@ -1010,12 +1056,12 @@ def approve_pin_reset_request(req_id):
     member = Member.query.filter_by(member_id=req.member_id).first()
     if not member:
         return jsonify({"error": "That member no longer exists."}), 404
-    member.pin_hash = None
+    code = _reset_student_pin(member)
     req.status = "Approved"
     req.reviewed_by = current_user.name
     req.reviewed_at = date.today().isoformat()
     db.session.commit()
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "pin_setup_code": code})
 
 
 @app.route("/api/pin-reset-requests/<int:req_id>/deny", methods=["POST"])
@@ -1464,7 +1510,15 @@ def list_members():
             haystack = " ".join(filter(None, [m.name, m.member_id, m.class_dept, m.admission_no])).lower()
             return q in haystack
         members = [m for m in members if matches(m)]
-    return jsonify([m.to_dict() for m in members])
+    out = [m.to_dict() for m in members]
+    # The codes themselves and the lock state go to admin/librarian only
+    # (the ones who can act on them); viewers get the plain member data.
+    if current_user.role in ("admin", "librarian"):
+        locked = security.locked_accounts(DB_PATH)
+        for m, row in zip(members, out):
+            row["pin_setup_code"] = m.pin_setup_code
+            row["signin_locked"] = m.type == "Student" and _student_account(m).lower() in locked
+    return jsonify(out)
 
 
 EMAIL_IN_USE_MESSAGE = "That email is already on another library card."
@@ -1535,25 +1589,88 @@ def update_member(mid):
     return jsonify(member.to_dict())
 
 
+def _reset_student_pin(member):
+    """
+    Clears the student's PIN, gives the card a fresh set-up code and lifts
+    any sign-in lock, so the student can create a new PIN as soon as the
+    librarian hands over the code. Returns the code. The caller commits.
+    """
+    member.pin_hash = None
+    member.pin_setup_code = _new_setup_code()
+    security.clear_account_lock(DB_PATH, _student_account(member))
+    return member.pin_setup_code
+
+
 @app.route("/api/members/<int:mid>/reset-pin", methods=["POST"])
 @login_required
 @role_required("admin", "librarian")
 def reset_member_pin(mid):
     """
-    Clears a student's PIN so they're walked through creating a new one
-    on their next login — the same "forgot my PIN" recovery a librarian
-    would handle in person. Note: from that point until the student
-    actually sets a new PIN, anyone who knows this student's admission
-    number and date of birth can claim the PIN first — see the /login
-    comment above. Do this only when you can point the student to log
-    in and set their new PIN right away, not as something left pending
-    over a school break.
+    Clears a student's PIN and issues a new set-up code — the "forgot my
+    PIN" recovery a librarian would handle in person. Only someone holding
+    that code (and the DOB) can create the new PIN, so do this only once
+    you've verified who's asking, and give the code to the student directly.
     """
     member = Member.query.get_or_404(mid)
     if member.type != "Student":
         return jsonify({"error": "Only student accounts have a PIN."}), 400
-    member.pin_hash = None
+    code = _reset_student_pin(member)
     db.session.commit()
+    return jsonify({"ok": True, "pin_setup_code": code})
+
+
+@app.route("/api/members/<int:mid>/pin-code", methods=["POST"])
+@login_required
+@role_required("admin", "librarian")
+def issue_member_pin_code(mid):
+    """
+    Issues (or replaces) the set-up code for a student who has no PIN yet.
+    A student who already has one goes through Reset PIN instead, so a
+    stray click here can never take a working PIN away.
+    """
+    member = Member.query.get_or_404(mid)
+    if member.type != "Student":
+        return jsonify({"error": "Only student accounts have a PIN."}), 400
+    if member.pin_hash:
+        return jsonify({"error": "This student already has a PIN. Use Reset PIN to replace it."}), 400
+    code = _reset_student_pin(member)
+    db.session.commit()
+    return jsonify({"ok": True, "pin_setup_code": code})
+
+
+@app.route("/api/members/pin-codes", methods=["POST"])
+@login_required
+@role_required("admin", "librarian")
+def issue_pin_codes_in_bulk():
+    """
+    Issues a set-up code to every student (optionally just one class) who
+    has neither a PIN nor a code yet — what go-live day needs, when most
+    cards have never been signed in to. Existing codes are left alone so a
+    slip already handed out stays valid. The codes then show in the member
+    list, which can be filtered by class and printed.
+    """
+    data = request.get_json(silent=True) or {}
+    class_dept = (data.get("class_dept") or "").strip()
+    query = Member.query.filter(Member.type == "Student", Member.pin_hash.is_(None),
+                                Member.pin_setup_code.is_(None))
+    if class_dept:
+        query = query.filter(Member.class_dept == class_dept)
+    issued = 0
+    for member in query.all():
+        member.pin_setup_code = _new_setup_code()
+        issued += 1
+    db.session.commit()
+    return jsonify({"ok": True, "issued": issued})
+
+
+@app.route("/api/members/<int:mid>/unlock", methods=["POST"])
+@login_required
+@role_required("admin", "librarian")
+def unlock_member_sign_in(mid):
+    """Lifts the lock a student's card gets after too many failed sign-ins
+    (see security.ACCOUNT_MAX_FAILURES); it does not lift on its own."""
+    member = Member.query.get_or_404(mid)
+    security.clear_account_lock(DB_PATH, _student_account(member))
     return jsonify({"ok": True})
 
 

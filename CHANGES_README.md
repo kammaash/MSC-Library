@@ -1,5 +1,26 @@
 # MSLRMS Hardening Update — What Changed
 
+## Sign-in limits and PIN set-up codes (October 2026)
+
+- **Creating a PIN now needs a set-up code from the librarian.** Before,
+  a correct admission number and date of birth on a card with no PIN let
+  anyone create the PIN and take the account. Now the student also types
+  a one-time 6-character code. Staff issue codes in Members: **Issue PIN
+  set-up codes** (every student without a PIN or code, optionally one
+  class), **Issue code** / **New code** on one card, and **Reset PIN** or
+  approving a "Forgot PIN" request now also issues one and shows it. The
+  code is shown in the member list's PIN column (admin/librarian only) and
+  stops working once used. This applies to offline (LAN) installs too.
+- **Three sign-in limits instead of one** (`security.py`): 5 failures from
+  one address for one username lock that pair for 15 minutes (as before);
+  10 failures on one account from any addresses lock it — a student card
+  stays locked until staff click **Unlock** (or issue a code / reset the
+  PIN), a staff account unlocks after an hour; 40 failures from one
+  address across all usernames block that address for 15 minutes. The
+  "Forgot PIN" request counts towards the same account and address limits.
+
+---
+
 ## Internet-Facing Deployment Support (August 2026)
 
 Added to support running SmartLib360 on a public subdomain (e.g.

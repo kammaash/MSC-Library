@@ -246,7 +246,9 @@ staging service. Tick each item in order.
    configures boto3 not to send the extra checksums that R2 rejects). If the
    upload fails or the file does not appear in the bucket, check the Render
    logs and report the error.
-6. Sign in as a student with the PIN and open all three.
+6. In Members, click **Issue code** on that member, then sign in as the
+   student (admission number, date of birth, the set-up code, a new PIN)
+   and open all three.
    - **Video seeking:** drag the video to a later point. It must jump there
      and keep playing. If it restarts or cannot skip, check in the Cloudflare
      dashboard that the object has the right size and content type; CORS is

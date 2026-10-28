@@ -72,7 +72,10 @@
         </p>
       </div>
       <div id="pinCreateBlock" style="display:none;">
-        <p class="login-hint" style="margin-top:0;">First time signing in — please create a PIN. Choose 4 to 6 digits and remember it (or ask a parent to note it down) — you'll need it every time you sign in from now on.</p>
+        <p class="login-hint" style="margin-top:0;">First time signing in (or your PIN was reset) — enter the set-up code your librarian gave you, then create a PIN. Choose 4 to 6 digits and remember it (or ask a parent to note it down) — you'll need it every time you sign in from now on.</p>
+        <label>Set-up code from the librarian
+          <input type="text" id="setupCode" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="16" placeholder="e.g. K7MP2Q">
+        </label>
         <label>Create a PIN
           <input type="password" id="newPin" inputmode="numeric" autocomplete="off" placeholder="4-6 digits">
         </label>
@@ -169,6 +172,7 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
       payload.pin = document.getElementById('studentPin').value.trim();
     }
     if (pinCreateBlock.style.display !== 'none') {
+      payload.setup_code = document.getElementById('setupCode').value.trim();
       payload.new_pin = document.getElementById('newPin').value.trim();
       payload.confirm_pin = document.getElementById('confirmPin').value.trim();
     }
@@ -193,13 +197,18 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
         pinInput.value = '';
         pinInput.focus();
       }
+      // Same for the set-up step: keep it open so only the wrong part is retyped.
+      if (data.need_setup_code) {
+        pinCreateBlock.style.display = '';
+        pinEnterBlock.style.display = 'none';
+      }
       return;
     }
 
-    if (data.must_set_pin) {
+    if (data.need_setup_code) {
       pinCreateBlock.style.display = '';
       pinEnterBlock.style.display = 'none';
-      document.getElementById('newPin').focus();
+      document.getElementById('setupCode').focus();
       return;
     }
     if (data.need_pin) {

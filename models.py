@@ -96,6 +96,13 @@ class Member(db.Model):
     # semi-public — so it shouldn't be the only thing standing between
     # an internet-facing login page and a student's account.
     pin_hash = db.Column(db.String(255))
+    # One-time code a librarian gives the student, required (with the DOB)
+    # to create the first PIN, or a new one after a reset. Without it,
+    # anyone who knew a student's admission number and date of birth could
+    # claim a card that had no PIN yet. Kept readable rather than hashed so
+    # the librarian can look it up in the member list; it is only accepted
+    # while the card has no PIN and is cleared once used.
+    pin_setup_code = db.Column(db.String(16))
     # School Microsoft account address, stored lowercased. Used to match a
     # Microsoft sign-in to a Member. Uniqueness is enforced in application
     # code, not by the database, so adding the column to an existing
@@ -115,6 +122,7 @@ class Member(db.Model):
             "type": self.type,
             "class_dept": self.class_dept,
             "pin_set": bool(self.pin_hash),
+            "pin_code_issued": bool(self.pin_setup_code),
             "phone": self.phone,
             "parent_phone": self.parent_phone,
             "admission_no": self.admission_no,
