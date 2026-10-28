@@ -350,15 +350,26 @@ DB_PATH = os.path.join(BASE_DIR, "database.db")
 # string as an environment variable. Locally, it's unset, so this falls back
 # to the same SQLite file the app has always used — no behavior change for
 # local/offline running via RUN_SmartLib360.bat.
+def _sqlalchemy_database_uri(raw: str) -> str:
+    """Turn the DATABASE_URL a provider hands out into the URL SQLAlchemy needs.
+
+    Render and Neon give "postgres://" or "postgresql://" URLs. Plain
+    "postgresql://" selects whichever driver SQLAlchemy defaults to, which is
+    psycopg2 in 2.0 but psycopg v3 from 2.1 (not installed here), so the
+    driver is named explicitly. Anything else — SQLite, or a URL that already
+    names a driver — is returned unchanged.
+    """
+    for prefix in ("postgres://", "postgresql://"):
+        if raw.startswith(prefix):
+            return "postgresql+psycopg2://" + raw[len(prefix):]
+    return raw
+
+
 _database_url = os.environ.get("DATABASE_URL")
 if _database_url:
-    # Render (and several other providers) hand out "postgres://" URLs, but
-    # SQLAlchemy's psycopg2 dialect requires "postgresql://" — without this
-    # rewrite, a URL pasted straight from the provider's dashboard fails to
-    # connect with a confusing "unknown dialect" error instead of an obvious one.
-    if _database_url.startswith("postgres://"):
-        _database_url = _database_url.replace("postgres://", "postgresql://", 1)
-    app.config["SQLALCHEMY_DATABASE_URI"] = _database_url
+    # security.py keeps using the raw DATABASE_URL (psycopg2.connect wants the
+    # plain form, not the "+psycopg2" SQLAlchemy spelling).
+    app.config["SQLALCHEMY_DATABASE_URI"] = _sqlalchemy_database_uri(_database_url)
 else:
     app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///" + DB_PATH
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
@@ -372,7 +383,16 @@ if _database_url:
     # connect_timeout is seconds-to-establish-a-connection for psycopg2, not
     # a per-query timeout — there's no exact equivalent to SQLite's lock-wait
     # timeout here, so this just guards against a hung connection attempt.
-    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"connect_args": {"connect_timeout": 15}}
+    #
+    # Neon closes idle connections (and scales its compute to zero), so a
+    # pooled connection can be dead by the time a request picks it up.
+    # pool_pre_ping tests each connection first and replaces a dead one;
+    # pool_recycle retires connections before Neon's idle cut-off.
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+        "connect_args": {"connect_timeout": 15},
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+    }
 else:
     # Without this, a burst of near-simultaneous writes (e.g. a whole class
     # logging in and each triggering a small write) can hit "database is

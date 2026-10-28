@@ -89,11 +89,22 @@ def _ensure_empty(engine, meta):
         )
 
 
+def _sqlalchemy_database_uri(raw: str) -> str:
+    """Same rewrite as app.py (duplicated: this script must not import app).
+    "postgres://" / "postgresql://" -> "postgresql+psycopg2://", so SQLAlchemy
+    2.1's default of psycopg v3 (not installed) never applies. Other URLs,
+    including ones that already name a driver, are returned unchanged."""
+    for prefix in ("postgres://", "postgresql://"):
+        if raw.startswith(prefix):
+            return "postgresql+psycopg2://" + raw[len(prefix):]
+    return raw
+
+
 def ensure_target_empty(target_url: str) -> None:
     """Raise RuntimeError ("not empty", naming the tables) if any table in the
     target database has rows. main() calls this before uploading files, so a
     non-empty database is reported before anything has been changed."""
-    engine = sa.create_engine(target_url)
+    engine = sa.create_engine(_sqlalchemy_database_uri(target_url))
     try:
         meta = sa.MetaData()
         meta.reflect(bind=engine)
@@ -108,8 +119,8 @@ def copy_database(source_url: str, target_url: str) -> dict:
     Returns {table name: rows copied}. Raises RuntimeError, copying nothing,
     if any target table already contains rows.
     """
-    source_engine = sa.create_engine(source_url)
-    target_engine = sa.create_engine(target_url)
+    source_engine = sa.create_engine(_sqlalchemy_database_uri(source_url))
+    target_engine = sa.create_engine(_sqlalchemy_database_uri(target_url))
     try:
         source_meta = sa.MetaData()
         source_meta.reflect(bind=source_engine)
@@ -204,9 +215,6 @@ def main(argv=None, env=os.environ) -> int:
     if not database_url:
         print("DATABASE_URL is not set. Point it at the Neon database.", file=sys.stderr)
         return 2
-    # Same rewrite app.py does: SQLAlchemy only knows "postgresql://".
-    if database_url.startswith("postgres://"):
-        database_url = database_url.replace("postgres://", "postgresql://", 1)
 
     try:
         storage = get_storage(os.path.dirname(os.path.abspath(__file__)), env)
