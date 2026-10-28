@@ -80,6 +80,39 @@ storage = get_storage(BASE_DIR)
 # offline mode, where QR codes fall back to the server's LAN address.
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 
+# "Sign in with Microsoft" for students, through the school's Entra ID
+# (Azure AD) tenant. Like the R2 settings, this is all-or-nothing: none of
+# the three ENTRA_* variables means the feature is off and the routes below
+# answer 404; all three means on; anything in between is a startup error,
+# because a half-configured sign-in would fail confusingly for students.
+# Empty strings count as unset. Entra also needs PUBLIC_BASE_URL, since the
+# redirect address Microsoft sends the browser back to must be an exact,
+# registered https address and cannot be guessed from the request.
+_ENTRA_ENV_VARS = ("ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "ENTRA_CLIENT_SECRET")
+
+
+def _entra_config(env):
+    """Returns (enabled, tenant_id, client_id, client_secret) from env, or raises RuntimeError."""
+    values = {name: (env.get(name) or "").strip() for name in _ENTRA_ENV_VARS}
+    missing = [name for name, value in values.items() if not value]
+    if len(missing) == len(_ENTRA_ENV_VARS):
+        return False, "", "", ""
+    if missing:
+        raise RuntimeError(
+            "Incomplete Microsoft sign-in configuration: missing " + ", ".join(missing)
+            + ". Set all of " + ", ".join(_ENTRA_ENV_VARS) + " to enable it, or none of them to turn it off."
+        )
+    if not (env.get("PUBLIC_BASE_URL") or "").strip().rstrip("/"):
+        raise RuntimeError(
+            "Microsoft sign-in configuration is missing PUBLIC_BASE_URL. Set it to the site's "
+            "public https address (e.g. https://library.example.org) so Microsoft can send "
+            "students back to the right place."
+        )
+    return True, values["ENTRA_TENANT_ID"], values["ENTRA_CLIENT_ID"], values["ENTRA_CLIENT_SECRET"]
+
+
+ENTRA_ENABLED, ENTRA_TENANT_ID, ENTRA_CLIENT_ID, ENTRA_CLIENT_SECRET = _entra_config(os.environ)
+
 # How long a presigned R2 link for an image or backup stays valid. Short,
 # because the browser follows the redirect immediately.
 FILE_LINK_TTL_SECONDS = 300
@@ -557,10 +590,45 @@ def ddmmyyyy_from_iso(iso_str):
 # --------------------------------------------------------------------------
 # Auth routes
 # --------------------------------------------------------------------------
+def _finish_student_login(member):
+    """
+    Signs the browser in as this student, provisioning their login account
+    on first use. Shared by the PIN login above and Sign in with Microsoft
+    below: whichever way a student proved who they are, they end up with
+    exactly the same kind of session.
+    """
+    user = User.query.filter_by(member_id=member.id, role="student").first()
+    if not user:
+        # auto-provision a student login tied to the member record
+        user = User(username=f"student-{member.member_id}", password_hash="", name=member.name,
+                    role="student", member_id=member.id)
+        db.session.add(user)
+        db.session.commit()
+    login_user(user)
+    session.permanent = False  # dies when the browser fully closes — no staying logged in on a shared school PC
+    session["srv"] = SERVER_INSTANCE_ID
+    return user
+
+
+# Shown on the login page after a failed Microsoft sign-in. The page is sent
+# only a short code in ?ms_error=; the wording lives here, so nothing a
+# visitor puts in the address bar is ever displayed back to them.
+_MS_ERROR_MESSAGES = {
+    "not_linked": "Your Microsoft account isn't linked to a library card yet. "
+                  "Ask the librarian to add your school email to your library card.",
+    "wrong_school": "Please sign in with your school Microsoft account.",
+    "failed": "Microsoft sign-in didn't complete. Please try again.",
+}
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "GET":
-        return render_template("login.html")
+        return render_template(
+            "login.html",
+            entra_enabled=ENTRA_ENABLED,
+            ms_error_message=_MS_ERROR_MESSAGES.get(request.args.get("ms_error", "")),
+        )
 
     data = request.get_json(silent=True) or request.form
     role_mode = data.get("role_mode", "staff")  # staff | student
@@ -632,16 +700,7 @@ def login():
                 return jsonify({"error": msg, "need_pin": True, "attempts_remaining": remaining}), 401
             security.clear_attempts(DB_PATH, client_ip, f"{role_mode}:{username}")
 
-        user = User.query.filter_by(member_id=member.id, role="student").first()
-        if not user:
-            # auto-provision a student login tied to the member record
-            user = User(username=f"student-{member.member_id}", password_hash="", name=member.name,
-                        role="student", member_id=member.id)
-            db.session.add(user)
-            db.session.commit()
-        login_user(user)
-        session.permanent = False  # dies when the browser fully closes — no staying logged in on a shared school PC
-        session["srv"] = SERVER_INSTANCE_ID
+        user = _finish_student_login(member)
         return jsonify({"ok": True, "user": {"name": user.name, "role": user.role}})
 
     user = User.query.filter_by(username=username).first()
@@ -658,6 +717,132 @@ def login():
         "user": {"name": user.name, "role": user.role},
         "must_change_password": must_change,
     })
+
+
+# --------------------------------------------------------------------------
+# Sign in with Microsoft (students only)
+# --------------------------------------------------------------------------
+# Standard OpenID Connect authorization-code flow, done by msal. The browser
+# is sent to Microsoft, the school account signs in there, and Microsoft
+# redirects back to /auth/microsoft/callback with a one-time code. Both
+# routes are GET and need no existing login, and no before_request hook above
+# blocks them once setup is complete (the setup and password-change hooks only
+# act on a fresh install or an already signed-in account). The callback is a
+# GET on purpose: response_mode=form_post would make Microsoft POST back
+# cross-site, and the SameSite=Lax session cookie holding the flow state
+# would not be sent with that request.
+#
+# Staff and admin accounts keep their username and password; only members
+# whose library card is type "Student" can come in this way.
+def _entra_app():
+    # Imported here so offline installs that never enable Microsoft sign-in
+    # don't need msal loaded. Tests replace this whole function.
+    import msal
+    return msal.ConfidentialClientApplication(
+        ENTRA_CLIENT_ID,
+        client_credential=ENTRA_CLIENT_SECRET,
+        authority=f"https://login.microsoftonline.com/{ENTRA_TENANT_ID}",
+    )
+
+
+def _microsoft_failure(code):
+    return redirect(url_for("login", ms_error=code))
+
+
+@app.route("/auth/microsoft/login")
+def microsoft_login():
+    if not ENTRA_ENABLED:
+        abort(404)
+    flow = _entra_app().initiate_auth_code_flow(
+        ["User.Read"],
+        redirect_uri=PUBLIC_BASE_URL + "/auth/microsoft/callback",
+        # School computers are shared: always show the account picker, so a
+        # student is never silently signed in as the previous student whose
+        # Microsoft session is still open in that browser.
+        prompt="select_account",
+    )
+    # Holds the state, nonce and PKCE verifier for this one attempt. The
+    # callback removes it as soon as it reads it, so a callback URL cannot
+    # be replayed.
+    session["entra_flow"] = flow
+    return redirect(flow["auth_uri"])
+
+
+@app.route("/auth/microsoft/callback")
+def microsoft_callback():
+    if not ENTRA_ENABLED:
+        abort(404)
+
+    # No stored flow means this browser never started a sign-in (or it was
+    # already used, or the session expired). Refuse before talking to Microsoft.
+    flow = session.pop("entra_flow", None)
+    if not flow:
+        return _microsoft_failure("failed")
+
+    # msal checks the returned state against the flow and the ID token's
+    # signature, issuer, audience, expiry and nonce, and raises or returns an
+    # "error" if any of that is wrong. Only the error code is logged: never
+    # the token, the code, or Microsoft's free-text description.
+    try:
+        result = _entra_app().acquire_token_by_auth_code_flow(flow, request.args.to_dict())
+    except Exception as e:
+        app.logger.warning("Microsoft sign-in failed: %s", type(e).__name__)
+        return _microsoft_failure("failed")
+    if not isinstance(result, dict) or "error" in result:
+        app.logger.warning("Microsoft sign-in failed: %s",
+                           result.get("error") if isinstance(result, dict) else "unexpected result")
+        return _microsoft_failure("failed")
+
+    claims = result.get("id_token_claims") or {}
+    tid = str(claims.get("tid") or "").strip()
+    oid = str(claims.get("oid") or "").strip()
+    if not tid or not oid:
+        return _microsoft_failure("failed")
+    # A personal or other school's Microsoft account can sign in to this app
+    # registration only if the registration allows it; refuse here regardless.
+    if tid.lower() != ENTRA_TENANT_ID.lower():
+        return _microsoft_failure("wrong_school")
+
+    email = str(claims.get("preferred_username") or claims.get("email") or "").strip().lower()
+
+    # Match on the stable object id first. Once an account is bound to a
+    # library card, a renamed email in Entra makes no difference, and the
+    # email is never consulted again for that account.
+    bound = Member.query.filter_by(entra_oid=oid).all()
+    if bound:
+        candidates = bound
+        bind_oid = False
+    elif email:
+        # First sign-in: find the card by the school email the librarian
+        # recorded. Compared case-insensitively because rows can predate
+        # the lowercase rule.
+        candidates = Member.query.filter(
+            db.func.lower(Member.email) == email, Member.type == "Student").all()
+        bind_oid = True
+    else:
+        candidates = []
+        bind_oid = False
+
+    # Exactly one Student card, or nobody gets in: zero is simply not
+    # linked, and more than one (should never happen, uniqueness is
+    # enforced when saving) is ambiguous, so it is refused too.
+    if len(candidates) != 1 or candidates[0].type != "Student":
+        return _microsoft_failure("not_linked")
+    member = candidates[0]
+    # An email already bound to a different Microsoft account is never
+    # silently re-pointed; the librarian must change the email first.
+    if bind_oid and member.entra_oid and member.entra_oid != oid:
+        return _microsoft_failure("not_linked")
+    if bind_oid:
+        member.entra_oid = oid
+        db.session.commit()
+
+    # Start from an empty session before signing in, so nothing planted in
+    # the browser's earlier session (session fixation) carries over. A new
+    # CSRF token is issued on the next request.
+    session.clear()
+    _finish_student_login(member)
+    return redirect("/")
 
 
 @app.route("/api/pin-reset-request", methods=["POST"])
@@ -1144,17 +1329,40 @@ def list_members():
     return jsonify([m.to_dict() for m in members])
 
 
+EMAIL_IN_USE_MESSAGE = "That email is already on another library card."
+
+
+def _normalize_email(value):
+    """Trimmed, lowercased school email, or None when blank."""
+    if value is None:
+        return None
+    return str(value).strip().lower() or None
+
+
+def _email_in_use(email, exclude_id=None):
+    """True if another member already has this (already lowercased) email."""
+    query = Member.query.filter(db.func.lower(Member.email) == email)
+    if exclude_id is not None:
+        query = query.filter(Member.id != exclude_id)
+    return query.first() is not None
+
+
 @app.route("/api/members", methods=["POST"])
 @login_required
 @role_required("admin", "librarian")
 def add_member():
     data = request.get_json()
+    email = _normalize_email(data.get("email"))
+    if email and len(email) > 254:
+        return jsonify({"error": "That email address is too long."}), 400
+    if email and _email_in_use(email):
+        return jsonify({"error": EMAIL_IN_USE_MESSAGE}), 409
     mid = data.get("member_id") or next_member_id()
     member = Member(
         member_id=mid, name=data["name"], type=data.get("type", "Student"),
         class_dept=data.get("class_dept"), phone=data.get("phone"),
         parent_phone=data.get("parent_phone"), admission_no=data.get("admission_no"),
-        dob=data.get("dob"),
+        dob=data.get("dob"), email=email,
     )
     db.session.add(member)
     db.session.commit()
@@ -1169,6 +1377,19 @@ def add_member():
 def update_member(mid):
     member = Member.query.get_or_404(mid)
     data = request.get_json()
+    if "email" in data:
+        email = _normalize_email(data["email"])
+        if email != ((member.email or "").lower() or None):
+            if email and len(email) > 254:
+                return jsonify({"error": "That email address is too long."}), 400
+            if email and _email_in_use(email, exclude_id=member.id):
+                return jsonify({"error": EMAIL_IN_USE_MESSAGE}), 409
+            member.email = email
+            # The Microsoft account linked to this card was matched through
+            # the old email; a different email means a different person may
+            # be meant, so the link is dropped and re-forms on their next
+            # Microsoft sign-in. Saving the same email leaves it alone.
+            member.entra_oid = None
     for field in ["name", "type", "class_dept", "phone", "parent_phone", "admission_no", "dob"]:
         if field in data:
             setattr(member, field, data[field])
@@ -3007,6 +3228,7 @@ def import_members():
         df = excel.parse(best_sheet)
         total_rows = len(df)
         created, skipped_duplicate, skipped_blank, skipped_error = 0, 0, 0, 0
+        skipped_duplicate_email = 0
         first_error = None
 
         for row_num, row in df.iterrows():
@@ -3019,6 +3241,14 @@ def import_members():
                 admission_no = _import_cell(row, best_map, "admission_no")
                 if admission_no and Member.query.filter_by(admission_no=admission_no).first():
                     skipped_duplicate += 1
+                    continue
+
+                # A school email can sit on only one library card (it is how
+                # a Microsoft sign-in finds the student), so a row whose email
+                # another card already has is skipped rather than imported.
+                email = _normalize_email(_import_cell(row, best_map, "email"))
+                if email and (len(email) > 254 or _email_in_use(email)):
+                    skipped_duplicate_email += 1
                     continue
 
                 class_val = _import_cell(row, best_map, "class_name")
@@ -3037,7 +3267,7 @@ def import_members():
                 member = Member(
                     member_id=member_id, name=name, type="Student",
                     class_dept=class_dept, phone=phone or None, parent_phone=parent_phone or None,
-                    admission_no=admission_no or None, dob=dob_iso,
+                    admission_no=admission_no or None, dob=dob_iso, email=email,
                 )
                 db.session.add(member)
                 db.session.flush()
@@ -3056,6 +3286,7 @@ def import_members():
             "total_rows": total_rows,
             "created": created,
             "skipped_duplicate": skipped_duplicate,
+            "skipped_duplicate_email": skipped_duplicate_email,
             "skipped_blank": skipped_blank,
             "skipped_error": skipped_error,
         }
@@ -3096,6 +3327,7 @@ MEMBER_IMPORT_COLUMN_ALIASES = {
     "section": ["section", "sec"],
     "phone": ["mobile", "phone", "mobile no", "mobile number", "contact", "contact no", "contact number"],
     "parent_phone": ["parent phone", "parent mobile", "father mobile", "guardian phone", "parent contact"],
+    "email": ["email", "email id", "email address", "school email", "mail id"],
 }
 
 

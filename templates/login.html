@@ -53,6 +53,10 @@
       </label>
     </div>
     <div id="studentFields" style="display:none;">
+      {% if entra_enabled %}
+      <a class="brass ms-signin-btn" href="{{ url_for('microsoft_login') }}">Sign in with Microsoft</a>
+      <div class="login-or"><span>or</span></div>
+      {% endif %}
       <label>Admission Number
         <input type="text" id="admissionNo" autocomplete="username">
       </label>
@@ -85,7 +89,7 @@
         <button type="button" class="ghost" id="forgotPinCancel">Cancel</button>
       </div>
     </div>
-    <p class="login-error" id="loginError"></p>
+    <p class="login-error" id="loginError">{{ ms_error_message or '' }}</p>
     <p class="login-hint" id="loginInfo" style="display:none;"></p>
     <button type="submit" class="brass" id="loginSubmitBtn">Sign In</button>
   </form>
@@ -209,6 +213,16 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
     errorEl.textContent = 'Could not reach the server. Please try again.';
   }
 });
+
+/* ---------- Coming back from a failed Microsoft sign-in ----------
+   The server has already put the (fixed) message in #loginError; skip the
+   welcome screen and show the Student tab so the student sees it. */
+if (document.getElementById('loginError').textContent.trim()) {
+  welcomeScreen.style.display = 'none';
+  loginCard.style.display = '';
+  loginCard.classList.add('login-fade-in');
+  studentBtn.click();
+}
 
 /* ---------- Forgot PIN? (self-service request, admin/librarian approves) ---------- */
 const forgotPinLink = document.getElementById('forgotPinLink');

@@ -526,6 +526,7 @@ function memberForm(existing) {
         <div class="field"><label>Date of Birth <span class="hint">(student login password, format DD-MM-YYYY)</span></label><input type="text" id="m_dob" placeholder="DD-MM-YYYY" pattern="\\d{2}-\\d{2}-\\d{4}" value="${isoToDDMMYYYY(m.dob || '')}"></div>
         <div class="field"><label>Phone</label><input id="m_phone" value="${escapeHtml(m.phone || '')}"></div>
         <div class="field"><label>Parent Phone</label><input id="m_pphone" value="${escapeHtml(m.parent_phone || '')}"></div>
+        <div class="field full"><label>School Email <span class="hint">(links the student's Microsoft sign-in${m.ms_linked ? '; a Microsoft account is linked, changing the email unlinks it' : ''})</span></label><input type="email" id="m_email" autocomplete="off" value="${escapeHtml(m.email || '')}"></div>
       </div>
       <div class="modal-actions">
         <button type="button" class="ghost" onclick="closeModal()">Cancel</button>
@@ -550,6 +551,7 @@ document.getElementById('addMemberBtn').addEventListener('click', () => {
           dob: dobIso,
           phone: document.getElementById('m_phone').value,
           parent_phone: document.getElementById('m_pphone').value,
+          email: document.getElementById('m_email').value,
         })
       });
       toast('Member added.'); closeModal(); loadMembers();
@@ -578,6 +580,7 @@ document.getElementById('membersBody').addEventListener('click', async e => {
             dob: dobIso,
             phone: document.getElementById('m_phone').value,
             parent_phone: document.getElementById('m_pphone').value,
+            email: document.getElementById('m_email').value,
           })
         });
         toast('Member updated.'); closeModal(); loadMembers();
@@ -613,6 +616,7 @@ document.getElementById('importMembersInput').addEventListener('change', async e
     } else {
       const bits = [`Added ${data.created} of ${data.total_rows} student(s) from "${data.sheet_used}"`];
       if (data.skipped_duplicate) bits.push(`${data.skipped_duplicate} already existed (matched by admission no.)`);
+      if (data.skipped_duplicate_email) bits.push(`${data.skipped_duplicate_email} skipped (email already on another card)`);
       if (data.skipped_blank) bits.push(`${data.skipped_blank} had no name`);
       if (data.skipped_error) bits.push(`${data.skipped_error} row(s) had an error`);
       toast(bits.join(' — ') + '.');

@@ -32,3 +32,10 @@ psycopg2-binary==2.9.10
 # API, so boto3 is the client; only imported when the R2_* variables are
 # set, so offline installs never use it at runtime.
 boto3==1.43.120
+
+# Added for "Sign in with Microsoft" (students). msal does the OpenID
+# Connect authorization-code flow against the school's Entra ID tenant and
+# validates the returned state, nonce and ID token. Only imported when the
+# ENTRA_* variables are set (see _entra_app in app.py), so offline installs
+# never use it at runtime.
+msal==1.39.0

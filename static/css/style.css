@@ -596,6 +596,9 @@ form input, form select { width: 100%; }
 .login-card label { font-size: 12px; font-weight: 600; color: var(--navy); }
 .login-card input { width: 100%; margin-top: 4px; }
 .login-card .brass { width: 100%; padding: 10px 0; margin-top: 6px; font-size: 14px; }
+.login-card .ms-signin-btn { display: block; box-sizing: border-box; text-align: center; text-decoration: none; padding: 10px 0; margin-bottom: 4px; font-size: 14px; }
+.login-or { display: flex; align-items: center; gap: 10px; color: var(--ink-soft); font-size: 12px; margin: 10px 0 2px; }
+.login-or::before, .login-or::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 .login-error { color: var(--danger); font-size: 12px; min-height: 16px; margin: 0; }
 
 /* ---------- wide setup wizard (more fields than a normal login card,

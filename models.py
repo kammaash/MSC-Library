@@ -119,6 +119,8 @@ class Member(db.Model):
             "parent_phone": self.parent_phone,
             "admission_no": self.admission_no,
             "dob": self.dob,
+            "email": self.email,
+            "ms_linked": bool(self.entra_oid),
             "qr_path": self.qr_path,
             "active_loans": active_loans,
         }
