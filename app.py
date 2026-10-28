@@ -1712,6 +1712,23 @@ def list_online_books():
     return jsonify([b.to_dict() for b in books])
 
 
+def _online_book_target(book):
+    """
+    Which stored file the reader should get for a digital item, and how:
+    returns (key, mimetype, inline, download_name). The auto-converted PDF
+    preview wins when one exists; otherwise the original is served, inline
+    for formats a browser can render and as a download for the rest (Word/
+    PowerPoint). Shared by /view and /link so both always agree.
+    """
+    if book.preview_pdf_path:
+        return book.preview_pdf_path, "application/pdf", True, None
+    ext = "." + (book.file_type or "pdf")
+    category, mimetype = DIGITAL_LIBRARY_TYPES.get(ext, ("other", "application/octet-stream"))
+    inline = category in ("document", "video", "audio", "ebook")
+    download_name = None if inline else f"{book.title}.{book.file_type}"
+    return book.pdf_path, mimetype, inline, download_name
+
+
 @app.route("/api/online-books/<int:book_id>/view")
 @login_required
 def view_online_book(book_id):
@@ -1731,14 +1748,7 @@ def view_online_book(book_id):
         if _student:
             _log_read_history(_student, book_id)
 
-    if book.preview_pdf_path:
-        key, mimetype, inline, download_name = book.preview_pdf_path, "application/pdf", True, None
-    else:
-        key = book.pdf_path
-        ext = "." + (book.file_type or "pdf")
-        category, mimetype = DIGITAL_LIBRARY_TYPES.get(ext, ("other", "application/octet-stream"))
-        inline = category in ("document", "video", "audio", "ebook")
-        download_name = None if inline else f"{book.title}.{book.file_type}"
+    key, mimetype, inline, download_name = _online_book_target(book)
 
     response = _send_stored(key, mimetype=mimetype, download_name=download_name,
                             expires_in=LINK_TTL_SECONDS)
@@ -1750,6 +1760,105 @@ def view_online_book(book_id):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+@app.route("/api/online-books/<int:book_id>/link")
+def online_book_link(book_id):
+    """
+    Gives the in-app reader a URL for a digital item, plus when it stops
+    working. Locally that is the streaming /view route (no expiry). On R2 it
+    is a presigned link valid for LINK_TTL_SECONDS; the reader warns the
+    student shortly before then and calls this again with ?renew=1 to get a
+    fresh one, which needs a valid login, so a signed-out reader cannot keep
+    going. A renewal is not a new "open", so it is not logged.
+
+    Deliberately not @login_required: that would answer a signed-out reader
+    with the login page's HTML redirect, which the reader cannot act on. It
+    gets a JSON 401 it can turn into a "please sign in again" prompt.
+    """
+    if not current_user.is_authenticated:
+        return jsonify({"error": "Please sign in again to keep reading.",
+                        "login_required": True}), 401
+    book = db.session.get(OnlineBook, book_id)
+    if book is None:
+        return jsonify({"error": "Item not found."}), 404
+
+    student = _current_student_member()
+    if student and request.args.get("renew") != "1":
+        _log_read_history(student, book_id)
+
+    key, mimetype, _inline, download_name = _online_book_target(book)
+    if storage.remote:
+        url = storage.presigned_url(key, LINK_TTL_SECONDS, content_type=mimetype,
+                                    download_name=download_name)
+        expires_in = LINK_TTL_SECONDS
+        warn_at = max(expires_in - 300, expires_in // 2)
+    else:
+        url = f"/api/online-books/{book_id}/view?src=app"
+        expires_in = warn_at = None
+
+    progress = 0
+    if student:
+        row = ReadHistory.query.filter_by(member_id=student.member_id,
+                                          online_book_id=book_id).first()
+        progress = (row.progress_seconds or 0) if row else 0
+
+    response = jsonify({
+        "url": url,
+        "expires_in": expires_in,
+        "warn_at": warn_at,
+        # The reader renders what it is handed, so report the preview's type.
+        "file_type": "pdf" if book.preview_pdf_path else book.file_type,
+        "progress_seconds": progress,
+    })
+    # The URL is a time-limited credential: keep it out of caches.
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/online-books/<int:book_id>/progress", methods=["POST"])
+def save_online_book_progress(book_id):
+    """
+    Remembers how far a student got in a video/audio item so the reader can
+    resume there. Students only; staff have no read history. Same JSON 401
+    as /link for a signed-out reader.
+    """
+    if not current_user.is_authenticated:
+        return jsonify({"error": "Please sign in again to keep reading.",
+                        "login_required": True}), 401
+    student = _current_student_member()
+    if not student:
+        return jsonify({"error": "Only students have a reading history."}), 403
+
+    body = request.get_json(silent=True)
+    seconds = body.get("seconds") if isinstance(body, dict) else None
+    # bool is an int subclass in Python, but true/false is not a position.
+    if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds < 0:
+        return jsonify({"error": "seconds must be a whole number, 0 or more."}), 400
+    if db.session.get(OnlineBook, book_id) is None:
+        return jsonify({"error": "Item not found."}), 404
+
+    row = ReadHistory.query.filter_by(member_id=student.member_id,
+                                      online_book_id=book_id).first()
+    if row is None:
+        # Normally /link already created the row, but an item opened some
+        # other way (a QR code, say) has none yet. Create it as a first open
+        # rather than failing and losing the student's place.
+        today = today_iso()
+        row = ReadHistory(member_id=student.member_id, online_book_id=book_id,
+                          first_opened=today, last_opened=today, open_count=1)
+        db.session.add(row)
+    row.progress_seconds = seconds
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # A concurrent request created the row first; update that one.
+        db.session.rollback()
+        row = ReadHistory.query.filter_by(member_id=student.member_id,
+                                          online_book_id=book_id).first()
+        row.progress_seconds = seconds
+        db.session.commit()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/online-books/<int:book_id>/download-original")

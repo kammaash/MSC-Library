@@ -152,3 +152,26 @@ def r2(app_module, monkeypatch):
         storage = R2Storage(client, "test-bucket")
         monkeypatch.setattr(app_module, "storage", storage, raising=False)
         yield storage
+
+
+def student_user(member):
+    """The User row tied to a Member, created the way login() provisions it."""
+    from models import User
+
+    return _persist(User(username=f"student-{member.member_id}", password_hash="",
+                         name=member.name, role="student", member_id=member.id))
+
+
+@pytest.fixture
+def sample_book(app_module):
+    """A video OnlineBook with a real file under the local uploads folder.
+    Written straight to disk (not via app.storage) so it also works in tests
+    that swap in the r2 fixture."""
+    from models import OnlineBook
+
+    key = "uploads/videos/sample.mp4"
+    path = os.path.join(app_module.BASE_DIR, *key.split("/"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"not really a video")
+    return _persist(OnlineBook(title="Sample", pdf_path=key, file_type="mp4"))
