@@ -31,6 +31,7 @@ repository is public.
 | `LIBRARY_SECRET_KEY` | Run `python -c "import secrets; print(secrets.token_hex(32))"` and paste the output. Keep the same value forever; changing it signs everyone out | Yes |
 | `LIBRARY_FORCE_HTTPS_COOKIES` | `1`. Secure cookies, redirect to HTTPS, HSTS | Yes |
 | `LIBRARY_TRUST_PROXY` | `1`. Makes login lockouts use the student's real IP address instead of Render's proxy. Do not set this on a school-PC install | Yes |
+| `LIBRARY_SETUP_TOKEN` | A long random value, e.g. the output of `python -c "import secrets; print(secrets.token_urlsafe(24))"`. With `LIBRARY_FORCE_HTTPS_COOKIES=1` the `/setup` page refuses to work without it and only opens as `/setup?token=<value>`. Keep it secret; it can be removed once the admin account exists | Yes |
 | `PUBLIC_BASE_URL` | `https://library.msceducation.net` (no trailing slash). Used in QR codes and as the Microsoft redirect address | Yes |
 | `TZ` | `Asia/Kolkata`. Makes due dates, fines and report times use Indian time; Render's clock is UTC otherwise | Yes |
 | `R2_ACCOUNT_ID` | Cloudflare account ID (R2 overview page) | Yes |
@@ -128,9 +129,13 @@ Do steps 4 and 5 first for the staging service described in step 6, and only
 after the staging check passes for the production service.
 
 **Prepare the database first, from your own PC, before the Render service
-exists.** The `/setup` page is open to anyone until the first admin exists,
-and a Render service's `*.onrender.com` address is public from the moment it
-deploys. Whoever reaches `/setup` first becomes the admin. So the tables (and,
+exists.** Until the first admin exists, `/setup` creates one for whoever
+submits it, and a Render service's `*.onrender.com` address is public from the
+moment it deploys. With `LIBRARY_FORCE_HTTPS_COOKIES=1` the app refuses
+`/setup` unless the address carries `?token=` with the value of
+`LIBRARY_SETUP_TOKEN` (and refuses it entirely if that variable is unset), so
+a stranger cannot complete it; preparing from your own PC removes the public
+window altogether. So the tables (and,
 for a fresh start, the admin account) are created from your own PC, and only
 then do you create the service. You need Python and the project folder on that
 PC (`pip install -r requirements.txt`); use Neon's **direct** connection
@@ -172,8 +177,10 @@ Now create the service:
    `--workers 1`; the app must run as a single process.
 4. Add the environment variables from the table above:
    `PYTHON_VERSION`, `DATABASE_URL` (the pooled string), `LIBRARY_SECRET_KEY`,
-   `LIBRARY_FORCE_HTTPS_COOKIES`, `LIBRARY_TRUST_PROXY`, `PUBLIC_BASE_URL`,
-   `TZ`, the four `R2_*`, and the three `ENTRA_*`.
+   `LIBRARY_FORCE_HTTPS_COOKIES`, `LIBRARY_TRUST_PROXY`, `LIBRARY_SETUP_TOKEN`,
+   `PUBLIC_BASE_URL`, `TZ`, the four `R2_*`, and the three `ENTRA_*`. If
+   you ever have to run `/setup` on Render itself (for example a new empty
+   database), open `https://<address>/setup?token=<LIBRARY_SETUP_TOKEN>`.
 5. Deploy. The tables are already in Neon from the preparation above, so the
    first start only checks them.
 

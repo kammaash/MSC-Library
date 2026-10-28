@@ -18,6 +18,7 @@
   <p class="tagline">This runs once, the very first time the system starts on a new computer.</p>
 
   <form id="setupForm">
+    <input type="hidden" id="setupToken" value="{{ setup_token }}">
     <label>School Name
       <input type="text" id="schoolName" placeholder="e.g. Riverside Public School" autocomplete="organization">
     </label>
@@ -64,6 +65,7 @@ document.getElementById('setupForm').addEventListener('submit', async (e) => {
   }
 
   const formData = new FormData();
+  formData.append('setup_token', document.getElementById('setupToken').value);
   formData.append('school_name', document.getElementById('schoolName').value.trim());
   formData.append('school_address', document.getElementById('schoolAddress').value.trim());
   formData.append('admin_name', document.getElementById('adminName').value.trim());

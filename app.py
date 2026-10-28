@@ -1142,15 +1142,50 @@ def update_branding():
 # once, on a database with zero User rows; see _require_first_run_setup
 # above and security.setup_is_complete().
 # --------------------------------------------------------------------------
+def _setup_token_problem(supplied):
+    """
+    On an internet-facing deployment (LIBRARY_FORCE_HTTPS_COOKIES=1) the
+    wizard is the one page where whoever reaches a fresh database first
+    becomes admin, so it also needs LIBRARY_SETUP_TOKEN, a secret set in the
+    host's environment and typed into the address as /setup?token=...
+    Returns the error message, or None when the request may proceed. With
+    the flag on and no token configured, setup is refused outright rather
+    than left open. A LAN install (flag off) needs no token.
+    """
+    if not _FORCE_HTTPS:
+        return None
+    expected = os.environ.get("LIBRARY_SETUP_TOKEN") or ""
+    if not expected:
+        return "Setup is disabled: set LIBRARY_SETUP_TOKEN in the server's environment first."
+    # Bytes, not str: compare_digest raises on non-ASCII text.
+    if not secrets.compare_digest(str(supplied or "").encode(), expected.encode()):
+        return "This setup link is missing its token or the token is wrong."
+    return None
+
+
 @app.route("/setup", methods=["GET", "POST"])
 def setup_wizard():
     if security.setup_is_complete(DB_PATH):
         return redirect(url_for("login"))
 
     if request.method == "GET":
-        return render_template("setup.html")
+        problem = _setup_token_problem(request.args.get("token"))
+        if problem:
+            return problem, 400
+        return render_template("setup.html", setup_token=request.args.get("token") or "")
 
+    # The token can be guessed at, so POST shares the sign-in counters
+    # (this address's failures, and a pair counter of its own).
+    client_ip = request.remote_addr or "unknown"
+    blocked = _sign_in_blocked_response(client_ip, "setup", "setup")
+    if blocked:
+        return blocked
     data = request.get_json(silent=True) or request.form
+    problem = _setup_token_problem(data.get("setup_token"))
+    if problem:
+        security.record_login_failure(DB_PATH, client_ip, "setup", "setup", account_exists=False)
+        return jsonify({"error": problem}), 400
+
     school_name = (data.get("school_name") or "").strip()
     school_address = (data.get("school_address") or "").strip()
     admin_name = (data.get("admin_name") or "").strip()
