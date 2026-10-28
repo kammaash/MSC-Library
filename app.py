@@ -18,6 +18,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, date, timedelta
@@ -82,6 +83,13 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 # How long a presigned R2 link for an image or backup stays valid. Short,
 # because the browser follows the redirect immediately.
 FILE_LINK_TTL_SECONDS = 300
+
+# How long a presigned R2 link for a digital library item (PDF, video, audio)
+# stays valid. Much longer than the image links above, because a video keeps
+# fetching byte ranges from the same link for as long as it plays. The
+# LIBRARY_LINK_TTL_SECONDS override exists so the expiry flow can be tested
+# without waiting half an hour.
+LINK_TTL_SECONDS = int(os.environ.get("LIBRARY_LINK_TTL_SECONDS", "1800"))
 
 
 def _get_or_create_secret_key():
@@ -359,7 +367,6 @@ app.config["MAX_FORM_PARTS"] = 5000  # generous headroom for large bulk-import b
 app.config["UPLOAD_BARCODES"] = os.path.join(BASE_DIR, "uploads", "barcodes")
 app.config["UPLOAD_QRCODES"] = os.path.join(BASE_DIR, "uploads", "qrcodes")
 app.config["UPLOAD_BACKUPS"] = os.path.join(BASE_DIR, "uploads", "backups")
-app.config["UPLOAD_EBOOKS"] = os.path.join(BASE_DIR, "uploads", "pdfs")
 app.config["REPORTS_DIR"] = os.path.join(BASE_DIR, "reports", "pdf")
 
 # Online Books (PDF library) upload limits
@@ -1548,7 +1555,7 @@ def _smart_search_rank(items, q, field_weights):
     return [item for _, item in scored]
 
 
-def _convert_to_pdf_preview(source_path, ext):
+def _convert_to_pdf_preview(source_path, ext, out_dir):
     """
     Converts a Word/PowerPoint file to PDF using LibreOffice running
     headless, so it can be read in-browser like a normal PDF instead of
@@ -1558,7 +1565,9 @@ def _convert_to_pdf_preview(source_path, ext):
     shown to the person uploading; this is a nice-to-have, not something
     that should ever block an upload.
 
-    Returns the relative path to the generated PDF, or None.
+    The PDF is written into out_dir (a temporary directory owned by the
+    caller, which uploads it to storage and then deletes the directory).
+    Returns the absolute path to the generated PDF, or None.
     """
     if ext not in (".doc", ".docx", ".ppt", ".pptx"):
         return None
@@ -1566,7 +1575,6 @@ def _convert_to_pdf_preview(source_path, ext):
     if not soffice:
         return None
     try:
-        out_dir = app.config["UPLOAD_EBOOKS"]
         result = subprocess.run(
             [soffice, "--headless", "--norestore", "--convert-to", "pdf", "--outdir", out_dir, source_path],
             capture_output=True, timeout=90,
@@ -1574,9 +1582,10 @@ def _convert_to_pdf_preview(source_path, ext):
         if result.returncode != 0:
             app.logger.warning(f"LibreOffice conversion failed for {source_path}: {result.stderr[:300]}")
             return None
-        generated = os.path.splitext(source_path)[0] + ".pdf"
+        # LibreOffice names its output after the source file.
+        generated = os.path.join(out_dir, os.path.splitext(os.path.basename(source_path))[0] + ".pdf")
         if os.path.exists(generated):
-            return os.path.relpath(generated, BASE_DIR)
+            return generated
     except Exception as e:
         app.logger.warning(f"LibreOffice conversion failed for {source_path}: {e}")
     return None
@@ -1610,43 +1619,76 @@ def _convert_to_pdf_preview(source_path, ext):
 
 
 def _save_digital_upload(file, subject_hint=None, category_hint=None, title_hint=None):
-    """Validates + saves one uploaded file, extracts text, returns an OnlineBook (uncommitted) or raises ValueError."""
+    """
+    Validates + stores one uploaded file, extracts text, returns an OnlineBook
+    (uncommitted) or raises ValueError.
+
+    The upload is first written to a throwaway temp directory, because text
+    extraction and the LibreOffice conversion need a real file on disk — and
+    in the cloud the app's own disk is not where files are meant to live.
+    Only then are the original (and the PDF preview, if one was made) handed
+    to storage. The temp directory is always removed afterwards. If storing
+    the second file fails, the first is deleted again and the error
+    propagates, so a failed upload never leaves an orphaned object behind.
+    """
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in DIGITAL_LIBRARY_TYPES:
         allowed = ", ".join(sorted(DIGITAL_LIBRARY_TYPES))
         raise ValueError(f"'{file.filename}' — unsupported file type. Allowed: {allowed}")
 
-    file_category, _mime = DIGITAL_LIBRARY_TYPES[ext]
-    os.makedirs(app.config["UPLOAD_EBOOKS"], exist_ok=True)
+    file_category, mime = DIGITAL_LIBRARY_TYPES[ext]
     safe_name = secure_filename(file.filename) or f"file{ext}"
-    stored_name = f"{secrets.token_hex(6)}_{safe_name}"
-    dest_path = os.path.join(app.config["UPLOAD_EBOOKS"], stored_name)
-    file.save(dest_path)
+    token = secrets.token_hex(6)
+    stored_name = f"{token}_{safe_name}"
+    saved_keys = []
+    tmp_dir = tempfile.mkdtemp(prefix="smartlib-upload-")
+    try:
+        source_path = os.path.join(tmp_dir, stored_name)
+        file.save(source_path)
 
-    size_kb = os.path.getsize(dest_path) // 1024
-    limit_mb = DIGITAL_LIBRARY_MAX_MB[file_category]
-    if size_kb / 1024 > limit_mb:
-        os.remove(dest_path)
-        raise ValueError(f"'{file.filename}' is {size_kb/1024:.1f} MB — the limit for this file type is {limit_mb} MB.")
+        size_kb = os.path.getsize(source_path) // 1024
+        limit_mb = DIGITAL_LIBRARY_MAX_MB[file_category]
+        if size_kb / 1024 > limit_mb:
+            raise ValueError(f"'{file.filename}' is {size_kb/1024:.1f} MB — the limit for this file type is {limit_mb} MB.")
 
-    content_text, ocr_used = _extract_content_text(dest_path, ext)
-    preview_pdf_rel = None
-    preview_pdf_full = _convert_to_pdf_preview(dest_path, ext)
-    if preview_pdf_full:
-        preview_pdf_rel = preview_pdf_full
+        content_text, ocr_used = _extract_content_text(source_path, ext)
+        preview_dir = os.path.join(tmp_dir, "preview")
+        os.makedirs(preview_dir)
+        preview_source = _convert_to_pdf_preview(source_path, ext, preview_dir)
+
+        rel_path = storage.save_file(source_path, f"uploads/pdfs/{stored_name}", mime)
+        saved_keys.append(rel_path)
+        preview_pdf_rel = None
+        if preview_source:
+            stem = os.path.splitext(safe_name)[0]
+            preview_pdf_rel = storage.save_file(
+                preview_source, f"uploads/pdfs/{token}_{stem}.pdf", "application/pdf")
+            saved_keys.append(preview_pdf_rel)
+    except BaseException:
+        for key in saved_keys:
+            storage.delete(key)
+        raise
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     title = (title_hint or "").strip()
     if not title:
         title = os.path.splitext(safe_name)[0].replace("_", " ").replace("-", " ").strip()
         title = re.sub(r"\s+", " ", title).title() or safe_name
 
-    rel_path = os.path.join("uploads", "pdfs", stored_name)
     return OnlineBook(
         title=title, subject=(subject_hint or None), category=(category_hint or None), pdf_path=rel_path,
         file_type=ext.lstrip("."), file_size_kb=size_kb,
         content_text=content_text or None, ocr_applied=ocr_used,
         added_date=today_iso(), preview_pdf_path=preview_pdf_rel,
     )
+
+
+def _delete_online_book_files(book, include_qr=True):
+    """Removes a digital item's stored objects. Call only once the database
+    no longer refers to them (i.e. after the commit)."""
+    for key in (book.pdf_path, book.preview_pdf_path, book.qr_path if include_qr else None):
+        storage.delete(key)
 
 
 @app.route("/api/online-books", methods=["GET"])
@@ -1682,23 +1724,29 @@ def view_online_book(book_id):
     browsers can't display those formats on their own.
     """
     book = OnlineBook.query.get_or_404(book_id)
-    _student = _current_student_member()
-    if _student:
-        _log_read_history(_student, book_id)
-    if book.preview_pdf_path:
-        full_path = os.path.join(BASE_DIR, book.preview_pdf_path)
-        response = send_file(full_path, mimetype="application/pdf")
-        response.headers["Content-Disposition"] = "inline"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Cache-Control"] = "no-store"
-        return response
+    # The in-app reader re-requests the file (e.g. to renew an expiring video
+    # link) with ?src=app; that is not the student opening the item again.
+    if request.args.get("src") != "app":
+        _student = _current_student_member()
+        if _student:
+            _log_read_history(_student, book_id)
 
-    full_path = os.path.join(BASE_DIR, book.pdf_path)
-    ext = "." + (book.file_type or "pdf")
-    category, mimetype = DIGITAL_LIBRARY_TYPES.get(ext, ("other", "application/octet-stream"))
-    inline = category in ("document", "video", "audio", "ebook")
-    response = send_file(full_path, mimetype=mimetype)
-    response.headers["Content-Disposition"] = "inline" if inline else f'attachment; filename="{os.path.basename(full_path)}"'
+    if book.preview_pdf_path:
+        key, mimetype, inline, download_name = book.preview_pdf_path, "application/pdf", True, None
+    else:
+        key = book.pdf_path
+        ext = "." + (book.file_type or "pdf")
+        category, mimetype = DIGITAL_LIBRARY_TYPES.get(ext, ("other", "application/octet-stream"))
+        inline = category in ("document", "video", "audio", "ebook")
+        download_name = None if inline else f"{book.title}.{book.file_type}"
+
+    response = _send_stored(key, mimetype=mimetype, download_name=download_name,
+                            expires_in=LINK_TTL_SECONDS)
+    # Locally these headers apply to the file itself; in R2 mode the response
+    # is only a redirect, so they are harmless there (and keep the redirect,
+    # whose URL is a time-limited credential, out of the browser cache).
+    if inline:
+        response.headers["Content-Disposition"] = "inline"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Cache-Control"] = "no-store"
     return response
@@ -1710,8 +1758,9 @@ def view_online_book(book_id):
 def download_original_online_book(book_id):
     """Staff-only: get the original Word/PowerPoint file (not the PDF preview), e.g. to edit it."""
     book = OnlineBook.query.get_or_404(book_id)
-    full_path = os.path.join(BASE_DIR, book.pdf_path)
-    return send_file(full_path, as_attachment=True, download_name=f"{book.title}.{book.file_type}")
+    category, mimetype = DIGITAL_LIBRARY_TYPES.get("." + (book.file_type or ""), ("other", "application/octet-stream"))
+    return _send_stored(book.pdf_path, mimetype=mimetype,
+                        download_name=f"{book.title}.{book.file_type}", expires_in=LINK_TTL_SECONDS)
 
 
 @app.route("/api/online-books", methods=["POST"])
@@ -1773,23 +1822,31 @@ def edit_online_book(book_id):
             app.logger.exception("Digital Library edit failed while saving the replacement file")
             return jsonify({"error": f"Could not save the file — {type(e).__name__}: {e}"}), 500
 
-        old_full_path = os.path.join(BASE_DIR, book.pdf_path)
-        old_preview_path = os.path.join(BASE_DIR, book.preview_pdf_path) if book.preview_pdf_path else None
+        old_keys = [book.pdf_path, book.preview_pdf_path]
         book.pdf_path = replacement.pdf_path
         book.file_type = replacement.file_type
         book.file_size_kb = replacement.file_size_kb
         book.content_text = replacement.content_text
         book.ocr_applied = replacement.ocr_applied
         book.preview_pdf_path = replacement.preview_pdf_path
-        for old_path in (old_full_path, old_preview_path):
-            if old_path and os.path.exists(old_path):
-                try:
-                    os.remove(old_path)
-                except OSError:
-                    pass
         _generate_qr_for_online_book(book)
 
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        if new_file and new_file.filename:
+            # The record still points at the old files, so the replacement's
+            # objects are the orphans. (The QR key is shared by old and new.)
+            _delete_online_book_files(replacement, include_qr=False)
+        raise
+    # Only now is it safe to drop the old files: the database no longer
+    # refers to them. (Deleting first and failing to commit would leave a
+    # record pointing at nothing.)
+    if new_file and new_file.filename:
+        for key in old_keys:
+            if key not in (book.pdf_path, book.preview_pdf_path):
+                storage.delete(key)
     return jsonify(book.to_dict())
 
 
@@ -1798,17 +1855,12 @@ def edit_online_book(book_id):
 @role_required("admin")
 def delete_online_book(book_id):
     book = OnlineBook.query.get_or_404(book_id)
-    full_path = os.path.join(BASE_DIR, book.pdf_path)
-    qr_full_path = os.path.join(BASE_DIR, book.qr_path) if book.qr_path else None
-    preview_full_path = os.path.join(BASE_DIR, book.preview_pdf_path) if book.preview_pdf_path else None
+    # Copy the keys first: once the row is deleted the book object is detached.
+    keys = (book.pdf_path, book.preview_pdf_path, book.qr_path)
     db.session.delete(book)
     db.session.commit()
-    for p in (full_path, qr_full_path, preview_full_path):
-        if p and os.path.exists(p):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+    for key in keys:
+        storage.delete(key)
     return jsonify({"ok": True})
 
 
@@ -1830,6 +1882,7 @@ def bulk_import_online_books():
     for f in files:
         if not f.filename:
             continue
+        book = None
         try:
             book = _save_digital_upload(f, subject_hint=shared_subject, category_hint=shared_category)
             db.session.add(book)
@@ -1839,6 +1892,10 @@ def bulk_import_online_books():
         except ValueError as ve:
             skipped.append(str(ve))
         except Exception as file_err:
+            # _save_digital_upload cleans up after itself when storing fails;
+            # if we got past it, the objects it stored are now orphans.
+            if book is not None:
+                _delete_online_book_files(book)
             skipped.append(f"{f.filename} ({file_err})")
 
     db.session.commit()
