@@ -268,14 +268,14 @@ function bookForm(existing) {
     <h3>${existing ? 'Edit Book' : 'Add a Book'}</h3>
     <form id="bookForm">
       <div class="field-grid">
-        <div class="field full"><label>Title *</label><input id="f_title" required value="${escapeHtml(b.title || '')}"></div>
-        <div class="field"><label>Author</label><input id="f_author" value="${escapeHtml(b.author || '')}"></div>
-        <div class="field"><label>ISBN</label><input id="f_isbn" value="${escapeHtml(b.isbn || '')}"></div>
-        <div class="field"><label>Publisher</label><input id="f_publisher" value="${escapeHtml(b.publisher || '')}"></div>
-        <div class="field"><label>Edition</label><input id="f_edition" value="${escapeHtml(b.edition || '')}"></div>
-        <div class="field"><label>Subject</label><input id="f_subject" value="${escapeHtml(b.subject || '')}"></div>
-        <div class="field"><label>Class</label><input id="f_class" value="${escapeHtml(b.class_name || '')}"></div>
-        <div class="field"><label>Rack No.</label><input id="f_rack" value="${escapeHtml(b.rack_no || '')}"></div>
+        <div class="field full"><label>Title *</label><input id="f_title" maxlength="300" required value="${escapeHtml(b.title || '')}"></div>
+        <div class="field"><label>Author</label><input id="f_author" maxlength="200" value="${escapeHtml(b.author || '')}"></div>
+        <div class="field"><label>ISBN</label><input id="f_isbn" maxlength="50" value="${escapeHtml(b.isbn || '')}"></div>
+        <div class="field"><label>Publisher</label><input id="f_publisher" maxlength="200" value="${escapeHtml(b.publisher || '')}"></div>
+        <div class="field"><label>Edition</label><input id="f_edition" maxlength="50" value="${escapeHtml(b.edition || '')}"></div>
+        <div class="field"><label>Subject</label><input id="f_subject" maxlength="100" value="${escapeHtml(b.subject || '')}"></div>
+        <div class="field"><label>Class</label><input id="f_class" maxlength="50" value="${escapeHtml(b.class_name || '')}"></div>
+        <div class="field"><label>Rack No.</label><input id="f_rack" maxlength="50" value="${escapeHtml(b.rack_no || '')}"></div>
         <div class="field"><label>Copies *</label><input type="number" id="f_copies" min="1" required value="${b.copies || 1}"></div>
         ${existing ? `<div class="field"><label>Status</label>
           <select id="f_status">
@@ -385,6 +385,7 @@ document.getElementById('importBooksInput').addEventListener('change', async e =
       const bits = [`Added ${data.created} of ${data.total_rows} book(s) from "${data.sheet_used}"`];
       if (data.skipped_duplicate) bits.push(`${data.skipped_duplicate} already existed`);
       if (data.skipped_blank) bits.push(`${data.skipped_blank} had no title`);
+      if (data.skipped_too_long) bits.push(`${data.skipped_too_long} had a value too long to store`);
       if (data.skipped_error) bits.push(`${data.skipped_error} row(s) had an error`);
       toast(bits.join(' — ') + '.');
       if (data.first_error) console.warn('First import row error:', data.first_error);
@@ -547,18 +548,18 @@ function memberForm(existing) {
     <h3>${existing ? 'Edit Member' : 'Add a Member'}</h3>
     <form id="memberForm">
       <div class="field-grid">
-        <div class="field full"><label>Full Name *</label><input id="m_name" required value="${escapeHtml(m.name || '')}"></div>
+        <div class="field full"><label>Full Name *</label><input id="m_name" maxlength="150" required value="${escapeHtml(m.name || '')}"></div>
         <div class="field"><label>Type *</label>
           <select id="m_type">
             <option ${m.type === 'Student' ? 'selected' : ''}>Student</option>
             <option ${m.type === 'Staff' ? 'selected' : ''}>Staff</option>
           </select>
         </div>
-        <div class="field"><label>Class / Dept.</label><input id="m_class" value="${escapeHtml(m.class_dept || '')}"></div>
-        <div class="field"><label>Admission No. <span class="hint">(student login ID)</span></label><input id="m_admission" value="${escapeHtml(m.admission_no || '')}"></div>
+        <div class="field"><label>Class / Dept.</label><input id="m_class" maxlength="80" value="${escapeHtml(m.class_dept || '')}"></div>
+        <div class="field"><label>Admission No. <span class="hint">(student login ID)</span></label><input id="m_admission" maxlength="50" value="${escapeHtml(m.admission_no || '')}"></div>
         <div class="field"><label>Date of Birth <span class="hint">(student login password, format DD-MM-YYYY)</span></label><input type="text" id="m_dob" placeholder="DD-MM-YYYY" pattern="\\d{2}-\\d{2}-\\d{4}" value="${isoToDDMMYYYY(m.dob || '')}"></div>
-        <div class="field"><label>Phone</label><input id="m_phone" value="${escapeHtml(m.phone || '')}"></div>
-        <div class="field"><label>Parent Phone</label><input id="m_pphone" value="${escapeHtml(m.parent_phone || '')}"></div>
+        <div class="field"><label>Phone</label><input id="m_phone" maxlength="20" value="${escapeHtml(m.phone || '')}"></div>
+        <div class="field"><label>Parent Phone</label><input id="m_pphone" maxlength="20" value="${escapeHtml(m.parent_phone || '')}"></div>
         <div class="field full"><label>School Email <span class="hint">(links the student's Microsoft sign-in${m.ms_linked ? '; a Microsoft account is linked, changing the email unlinks it' : ''})</span></label><input type="email" id="m_email" autocomplete="off" value="${escapeHtml(m.email || '')}"></div>
       </div>
       <div class="modal-actions">
@@ -667,6 +668,7 @@ document.getElementById('importMembersInput').addEventListener('change', async e
       if (data.skipped_duplicate) bits.push(`${data.skipped_duplicate} already existed (matched by admission no.)`);
       if (data.skipped_duplicate_email) bits.push(`${data.skipped_duplicate_email} skipped (email already on another card)`);
       if (data.skipped_blank) bits.push(`${data.skipped_blank} had no name`);
+      if (data.skipped_too_long) bits.push(`${data.skipped_too_long} had a value too long to store`);
       if (data.skipped_error) bits.push(`${data.skipped_error} row(s) had an error`);
       toast(bits.join(' — ') + '.');
       if (data.first_error) console.warn('First import row error:', data.first_error);
@@ -1368,10 +1370,10 @@ function onlineBookForm(existing) {
   return `
     <h3>${existing ? 'Edit Item' : 'Add to Digital Library'}</h3>
     <form id="onlineBookForm">
-      <label>Title *<input type="text" id="ob_title" value="${existing ? escapeHtml(existing.title) : ''}" required></label>
-      <label>Author<input type="text" id="ob_author" value="${existing ? escapeHtml(existing.author || '') : ''}"></label>
+      <label>Title *<input type="text" id="ob_title" maxlength="300" value="${existing ? escapeHtml(existing.title) : ''}" required></label>
+      <label>Author<input type="text" id="ob_author" maxlength="200" value="${existing ? escapeHtml(existing.author || '') : ''}"></label>
       <label>Category <span class="hint">(genre — e.g. Fiction, Comic, Biography)</span>
-        <input type="text" id="ob_category" list="ob_category_list" value="${existing ? escapeHtml(existing.category || '') : ''}">
+        <input type="text" id="ob_category" maxlength="100" list="ob_category_list" value="${existing ? escapeHtml(existing.category || '') : ''}">
       </label>
       <datalist id="ob_category_list">
         ${['Fiction', 'Non-Fiction', 'Comic', 'Biography', 'Reference', 'Poetry', 'Drama', 'Textbook', 'Encyclopedia',
@@ -1380,7 +1382,7 @@ function onlineBookForm(existing) {
           .map(s => `<option value="${escapeHtml(s)}">`).join('')}
       </datalist>
       <label>Subject <span class="hint">(academic — e.g. Maths, Physics, Chemistry)</span>
-        <input type="text" id="ob_subject" list="ob_subject_list" value="${existing ? escapeHtml(existing.subject || '') : ''}">
+        <input type="text" id="ob_subject" maxlength="100" list="ob_subject_list" value="${existing ? escapeHtml(existing.subject || '') : ''}">
       </label>
       <datalist id="ob_subject_list">
         ${['Mathematics', 'Physics', 'Chemistry', 'Biology', 'Computer Science', 'English', 'Social Studies', 'Hindi', 'Telugu',
@@ -1612,13 +1614,13 @@ function userForm(existing) {
   return `
     <h3>${existing ? 'Edit Account' : 'Add Account'}</h3>
     <form id="userForm">
-      <div class="field full"><label>Display Name *</label><input id="u_name" value="${existing ? escapeHtml(existing.name) : ''}" required></div>
+      <div class="field full"><label>Display Name *</label><input id="u_name" maxlength="150" value="${existing ? escapeHtml(existing.name) : ''}" required></div>
       <div class="field-grid">
         <div class="field"><label>Username ${existing ? '' : '*'}</label>
-          <input id="u_username" value="${existing ? escapeHtml(existing.username) : ''}" ${existing ? 'disabled' : 'required'}>
+          <input id="u_username" maxlength="80" value="${existing ? escapeHtml(existing.username) : ''}" ${existing ? 'disabled' : 'required'}>
           ${existing ? '<span class="hint">Username can\'t be changed here.</span>' : ''}
         </div>
-        <div class="field"><label>Mobile Number</label><input id="u_phone" value="${existing ? escapeHtml(existing.phone || '') : ''}" placeholder="e.g. 9876543210"></div>
+        <div class="field"><label>Mobile Number</label><input id="u_phone" maxlength="20" value="${existing ? escapeHtml(existing.phone || '') : ''}" placeholder="e.g. 9876543210"></div>
       </div>
       <div class="field full"><label>${existing ? 'New Password' : 'Password *'} <span class="hint">${existing ? '(leave blank to keep the current password)' : ''}</span></label>
         <input id="u_password" type="password" ${existing ? '' : 'required'}>

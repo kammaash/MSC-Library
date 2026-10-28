@@ -1417,6 +1417,36 @@ def next_accession_no():
         count += 1
 
 
+# How the length check names a field; others are shown as the column name
+# with spaces ("publisher" -> "Publisher").
+_FIELD_LABELS = {
+    "accession_no": "Accession number", "isbn": "ISBN", "class_name": "Class",
+    "rack_no": "Rack number", "member_id": "Member ID", "class_dept": "Class/Dept",
+    "parent_phone": "Parent's phone", "admission_no": "Admission number",
+    "dob": "Date of birth", "lost_date": "Lost date", "username": "Username",
+}
+
+
+def _length_problem(model, values):
+    """
+    Checks text about to be stored against the model's VARCHAR lengths
+    (models.py). Returns a readable message for the first value that is too
+    long, or None. SQLite ignores declared lengths, so offline this never
+    mattered; Postgres rejects the whole statement, which surfaced as a
+    generic 500. `values` maps column names to what will be stored; None
+    and names that are not columns are skipped.
+    """
+    columns = model.__table__.columns
+    for name, value in values.items():
+        if value is None or name not in columns:
+            continue
+        length = getattr(columns[name].type, "length", None)
+        if length and len(str(value)) > length:
+            label = _FIELD_LABELS.get(name, name.replace("_", " ").capitalize())
+            return f"{label} is too long (at most {length} characters)."
+    return None
+
+
 def _whole_number(value, label, default=0):
     """
     Parses a count or amount from JSON. Returns (number, None), or
@@ -1451,6 +1481,11 @@ def add_book():
     if err:
         return jsonify({"error": err}), 400
     acc = data.get("accession_no") or next_accession_no()
+    problem = _length_problem(Book, {"accession_no": acc, **{
+        f: data.get(f) for f in ("isbn", "title", "author", "publisher", "edition", "subject",
+                                 "class_name", "rack_no")}})
+    if problem:
+        return jsonify({"error": problem}), 400
     book = Book(
         accession_no=acc, isbn=data.get("isbn"), title=data["title"], author=data.get("author"),
         publisher=data.get("publisher"), edition=data.get("edition"), subject=data.get("subject"),
@@ -1475,6 +1510,11 @@ def update_book(book_id):
         new_copies, err = _whole_number(data["copies"], "Copies", default=1)
         if err:
             return jsonify({"error": err}), 400
+    problem = _length_problem(Book, {f: data[f] for f in ("isbn", "title", "author", "publisher", "edition",
+                                                          "subject", "class_name", "rack_no", "status")
+                                     if f in data})
+    if problem:
+        return jsonify({"error": problem}), 400
     for field in ["isbn", "title", "author", "publisher", "edition", "subject",
                   "class_name", "rack_no"]:
         if field in data:
@@ -1595,6 +1635,10 @@ def add_member():
     if email and _email_in_use(email):
         return jsonify({"error": EMAIL_IN_USE_MESSAGE}), 409
     mid = data.get("member_id") or next_member_id()
+    problem = _length_problem(Member, {"member_id": mid, **{
+        f: data.get(f) for f in ("name", "type", "class_dept", "phone", "parent_phone", "admission_no", "dob")}})
+    if problem:
+        return jsonify({"error": problem}), 400
     member = Member(
         member_id=mid, name=data["name"], type=data.get("type", "Student"),
         class_dept=data.get("class_dept"), phone=data.get("phone"),
@@ -1614,6 +1658,10 @@ def add_member():
 def update_member(mid):
     member = Member.query.get_or_404(mid)
     data = request.get_json()
+    problem = _length_problem(Member, {f: data[f] for f in ("name", "type", "class_dept", "phone", "parent_phone",
+                                                            "admission_no", "dob") if f in data})
+    if problem:
+        return jsonify({"error": problem}), 400
     if "email" in data:
         email = _normalize_email(data["email"])
         if email != ((member.email or "").lower() or None):
@@ -1873,6 +1921,9 @@ def lost_books():
         cost, err = _whole_number(data.get("cost"), "Cost", default=0)
         if err:
             return jsonify({"error": err}), 400
+        problem = _length_problem(LostBook, {f: data.get(f) for f in ("accession_no", "member_id", "lost_date")})
+        if problem:
+            return jsonify({"error": problem}), 400
         record = LostBook(accession_no=data["accession_no"], member_id=data.get("member_id"),
                            lost_date=data.get("lost_date") or today_iso(),
                            cost=cost, remarks=data.get("remarks"))
@@ -2527,6 +2578,11 @@ def add_online_book():
 
     if "file" not in request.files or not request.files["file"].filename:
         return jsonify({"error": "Please choose a file to upload."}), 400
+    # Checked before the upload is stored, so a long title costs no upload.
+    problem = _length_problem(OnlineBook, {"title": title, "author": author, "subject": subject,
+                                           "category": category})
+    if problem:
+        return jsonify({"error": problem}), 400
 
     try:
         book = _save_digital_upload(request.files["file"], subject_hint=subject, category_hint=category, title_hint=title)
@@ -2562,6 +2618,10 @@ def add_online_book():
 def edit_online_book(book_id):
     """Update title/author/subject, and optionally replace the file itself."""
     book = OnlineBook.query.get_or_404(book_id)
+    problem = _length_problem(OnlineBook, {f: (request.form.get(f) or "").strip()
+                                           for f in ("title", "author", "subject", "category")})
+    if problem:
+        return jsonify({"error": problem}), 400
 
     # Validate before touching the record. A form that omits grade_target
     # leaves the class as it was; an empty value means "All classes".
@@ -3161,6 +3221,10 @@ def list_users():
 @role_required("admin")
 def add_user():
     data = request.get_json()
+    problem = _length_problem(User, {"username": data.get("username"), "name": data.get("name"),
+                                     "role": data.get("role"), "phone": (data.get("phone") or "").strip()})
+    if problem:
+        return jsonify({"error": problem}), 400
     if User.query.filter_by(username=data["username"]).first():
         return jsonify({"error": "Username already taken."}), 400
     user = User(username=data["username"], name=data["name"], role=data.get("role", "librarian"),
@@ -3186,6 +3250,10 @@ def edit_user(uid):
     """
     user = User.query.get_or_404(uid)
     data = request.get_json() or {}
+    problem = _length_problem(User, {"name": (data.get("name") or "").strip(), "role": data.get("role"),
+                                     "phone": (data.get("phone") or "").strip()})
+    if problem:
+        return jsonify({"error": problem}), 400
 
     new_name = (data.get("name") or "").strip()
     if new_name:
@@ -3528,6 +3596,7 @@ def import_books():
         df = excel.parse(best_sheet)
         total_rows = len(df)
         created, skipped_duplicate, skipped_blank, skipped_error = 0, 0, 0, 0
+        skipped_too_long = 0
         first_error = None
 
         for row_num, row in df.iterrows():
@@ -3549,6 +3618,17 @@ def import_books():
                 except (TypeError, ValueError):
                     copies = 1
 
+                values = {"accession_no": acc, "title": title,
+                          **{f: _import_cell(row, best_map, f) for f in (
+                              "isbn", "author", "publisher", "edition", "subject", "class_name", "rack_no")}}
+                # Skipped and counted, never truncated: a cut-off accession
+                # number or title would be wrong data that looks right.
+                problem = _length_problem(Book, values)
+                if problem:
+                    skipped_too_long += 1
+                    if first_error is None:
+                        first_error = f"row {row_num + 2}: {problem}"
+                    continue
                 book = Book(
                     accession_no=acc,
                     isbn=_import_cell(row, best_map, "isbn"),
@@ -3590,6 +3670,7 @@ def import_books():
             "created": created,
             "skipped_duplicate": skipped_duplicate,
             "skipped_blank": skipped_blank,
+            "skipped_too_long": skipped_too_long,
             "skipped_error": skipped_error,
         }
         if first_error:
@@ -3646,6 +3727,7 @@ def import_members():
         total_rows = len(df)
         created, skipped_duplicate, skipped_blank, skipped_error = 0, 0, 0, 0
         skipped_duplicate_email = 0
+        skipped_too_long = 0
         first_error = None
 
         for row_num, row in df.iterrows():
@@ -3681,6 +3763,15 @@ def import_members():
                 if Member.query.filter_by(member_id=member_id).first():
                     member_id = next_member_id()
 
+                # Skipped and counted, never truncated (see import_books).
+                problem = _length_problem(Member, {
+                    "member_id": member_id, "name": name, "class_dept": class_dept, "phone": phone,
+                    "parent_phone": parent_phone, "admission_no": admission_no})
+                if problem:
+                    skipped_too_long += 1
+                    if first_error is None:
+                        first_error = f"row {row_num + 2}: {problem}"
+                    continue
                 member = Member(
                     member_id=member_id, name=name, type="Student",
                     class_dept=class_dept, phone=phone or None, parent_phone=parent_phone or None,
@@ -3713,6 +3804,7 @@ def import_members():
             "skipped_duplicate": skipped_duplicate,
             "skipped_duplicate_email": skipped_duplicate_email,
             "skipped_blank": skipped_blank,
+            "skipped_too_long": skipped_too_long,
             "skipped_error": skipped_error,
         }
         if first_error:
