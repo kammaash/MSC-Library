@@ -11,6 +11,9 @@ Follow the steps in order.
 | Files | Cloudflare R2 (Asia-Pacific) | PDFs, videos, barcodes, QR codes, backups |
 | Student sign-in | Microsoft Entra ID | "Sign in with Microsoft" for students |
 
+Production DNS (step 7) is changed only after the staging check (step 6)
+passes. Do not skip ahead to the domain.
+
 The offline school-PC install and the VPS install
 ([DEPLOY_TO_VPS.md](DEPLOY_TO_VPS.md)) are unaffected. Nothing below applies
 to them.
@@ -151,20 +154,7 @@ fails part-way the database is still empty and you can run it again. Old
 `uploads/backups/` files are not copied. Afterwards, sign in with the PC's
 existing admin account instead of using `/setup`.
 
-## 6. Domain
-
-1. In the msceducation.net DNS, change the `library` CNAME from
-   `kammaash.github.io` to the Render `*.onrender.com` host shown for your
-   service.
-   - If the domain's DNS is on Cloudflare, set this record to **DNS only**
-     (grey cloud), not proxied. A proxied record interferes with Render's
-     certificate.
-2. In Render, add the custom domain `library.msceducation.net` to the service
-   and wait until its certificate shows as issued.
-3. Turn off GitHub Pages for the repository: Settings, Pages, Unpublish (or
-   `gh api -X DELETE repos/kammaash/MSC-Library/pages`).
-
-## Before go-live: staging check
+## 6. Before go-live: staging check
 
 Do this on a separate Render service, ideally on a branch deploy, using a
 Neon **branch** (a copy of the project) and a **separate R2 bucket** with the
@@ -211,13 +201,26 @@ each item in order.
 11. Delete the staging service, Neon branch, bucket and the extra Redirect
     URI when finished.
 
-## 7. First run
+## 7. Domain
+
+1. In the msceducation.net DNS, change the `library` CNAME from
+   `kammaash.github.io` to the Render `*.onrender.com` host shown for your
+   service.
+   - If the domain's DNS is on Cloudflare, set this record to **DNS only**
+     (grey cloud), not proxied. A proxied record interferes with Render's
+     certificate.
+2. In Render, add the custom domain `library.msceducation.net` to the service
+   and wait until its certificate shows as issued.
+3. Turn off GitHub Pages for the repository: Settings, Pages, Unpublish (or
+   `gh api -X DELETE repos/kammaash/MSC-Library/pages`).
+
+## 8. First run
 
 Open `https://library.msceducation.net/setup` and create the admin account.
 Skip this if you migrated data in step 5. Confirm the address shows the login
 page with a valid certificate (padlock).
 
-## 8. Recovery
+## 9. Recovery
 
 - First line of defence: Neon's point-in-time restore window. Restore from the
   Neon dashboard if data is damaged or deleted.

@@ -26,8 +26,8 @@ On first run with a fresh database the app redirects to the Setup Wizard
   is Neon Postgres (`DATABASE_URL`), uploaded files and backups live in an R2
   bucket (`R2_*`), and students can sign in with their school Microsoft
   account (`ENTRA_*`). The guide has the full step-by-step instructions, the
-  table of every environment variable, a staging checklist to run before
-  go-live, and the recovery notes.
+  table of every environment variable, a staging checklist that must pass
+  before the domain is switched over, and the recovery notes.
 - **VPS:** see [deploy/DEPLOY_TO_VPS.md](deploy/DEPLOY_TO_VPS.md) for the
   Nginx + systemd setup.
 - **Windows .exe:** `BUILD_EXE.bat` builds a standalone executable with
