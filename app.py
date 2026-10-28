@@ -42,6 +42,7 @@ from models import (
 )
 import security
 import backup_scheduler
+from storage import get_storage
 
 def _get_base_dir():
     """
@@ -67,6 +68,20 @@ def _get_base_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 BASE_DIR = _get_base_dir()
+
+# Where uploaded/generated files live: BASE_DIR/uploads on local disk
+# (offline mode) or a Cloudflare R2 bucket (cloud mode), chosen from the R2_*
+# environment variables. Always reach it through this module global, never a
+# captured copy, so tests can swap it.
+storage = get_storage(BASE_DIR)
+
+# Public https address of the deployed site (no trailing slash). Empty in
+# offline mode, where QR codes fall back to the server's LAN address.
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+
+# How long a presigned R2 link for an image or backup stays valid. Short,
+# because the browser follows the redirect immediately.
+FILE_LINK_TTL_SECONDS = 300
 
 
 def _get_or_create_secret_key():
@@ -900,6 +915,27 @@ def index():
     return render_template("index.html", user=current_user)
 
 
+def _send_stored(key, *, mimetype=None, download_name=None, expires_in=FILE_LINK_TTL_SECONDS):
+    """
+    Send a stored file to the browser, whichever backend holds it.
+    Local disk: stream it from this server. R2: redirect to a short-lived
+    presigned link so the bytes never pass through this server.
+    Inline by default; a download_name makes the browser save it instead.
+    A bad key (e.g. one containing "..") or a missing file is a 404.
+    """
+    try:
+        if storage.remote:
+            return redirect(storage.presigned_url(
+                key, expires_in, content_type=mimetype, download_name=download_name), 302)
+        path = storage.local_path(key)
+    except ValueError:
+        abort(404)
+    if not os.path.isfile(path):
+        abort(404)
+    return send_file(path, mimetype=mimetype, as_attachment=bool(download_name),
+                     download_name=download_name)
+
+
 @app.route("/uploads/<path:subpath>")
 @login_required
 def serve_upload(subpath):
@@ -910,16 +946,9 @@ def serve_upload(subpath):
     images appeared broken/blank in the browser even though the files
     were being generated correctly on disk.
     Requires login, same as everything else in the app, and only ever
-    serves files that are actually inside uploads/ (no path traversal).
+    serves keys under uploads/ (storage rejects path traversal).
     """
-    uploads_root = os.path.join(BASE_DIR, "uploads")
-    full_path = os.path.normpath(os.path.join(uploads_root, subpath))
-    if not full_path.startswith(os.path.normpath(uploads_root) + os.sep):
-        abort(404)
-    if not os.path.isfile(full_path):
-        abort(404)
-    directory, filename = os.path.split(full_path)
-    return send_from_directory(directory, filename)
+    return _send_stored(f"uploads/{subpath}")
 
 
 @app.route("/api/whoami")
@@ -1069,11 +1098,16 @@ def generate_barcode_for_book(book):
     try:
         import barcode
         from barcode.writer import ImageWriter
-        os.makedirs(app.config["UPLOAD_BARCODES"], exist_ok=True)
+        # Accession numbers are typed by staff and could contain characters
+        # such as "/" that must not end up in a file name or storage key.
+        filename = secure_filename(book.accession_no)
+        if not filename:
+            raise ValueError(f"accession number {book.accession_no!r} has no usable file name")
         code = barcode.get("code128", book.accession_no, writer=ImageWriter())
-        filename = f"{book.accession_no}"
-        path = code.save(os.path.join(app.config["UPLOAD_BARCODES"], filename))
-        book.barcode_path = os.path.relpath(path, BASE_DIR)
+        buf = io.BytesIO()
+        code.write(buf)  # PNG bytes in memory; we choose the storage key ourselves
+        book.barcode_path = storage.save_bytes(
+            buf.getvalue(), f"uploads/barcodes/{filename}.png", "image/png")
     except Exception as e:
         app.logger.warning(f"Barcode generation failed: {e}")
 
@@ -1172,12 +1206,12 @@ def delete_member(mid):
 def generate_qr_for_member(member):
     try:
         import qrcode
-        os.makedirs(app.config["UPLOAD_QRCODES"], exist_ok=True)
         payload = f"MemberID:{member.member_id}|Name:{member.name}|Class:{member.class_dept or ''}"
         img = qrcode.make(payload)
-        path = os.path.join(app.config["UPLOAD_QRCODES"], f"{member.member_id}.png")
-        img.save(path)
-        member.qr_path = os.path.relpath(path, BASE_DIR)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        member.qr_path = storage.save_bytes(
+            buf.getvalue(), f"uploads/qrcodes/{member.member_id}.png", "image/png")
     except Exception as e:
         app.logger.warning(f"QR generation failed: {e}")
 
@@ -1467,17 +1501,22 @@ def _extract_content_text(path, ext):
 def _generate_qr_for_online_book(book):
     try:
         import qrcode
-        os.makedirs(app.config["UPLOAD_QRCODES"], exist_ok=True)
         # Deliberately NOT using request.host_url here — if the Librarian is
         # browsing via 127.0.0.1/localhost on the server PC itself (the
         # normal case), a QR code built from that address would only ever
-        # open on that same PC, never on a phone. get_lan_ip() always
-        # resolves to an address other devices on the network can reach.
-        url = f"http://{get_lan_ip()}:5000/api/online-books/{book.id}/view"
+        # open on that same PC, never on a phone. In the cloud the public
+        # site address (PUBLIC_BASE_URL) works from anywhere; offline,
+        # get_lan_ip() resolves to an address other devices on the network
+        # can reach.
+        if PUBLIC_BASE_URL:
+            url = f"{PUBLIC_BASE_URL}/api/online-books/{book.id}/view"
+        else:
+            url = f"http://{get_lan_ip()}:5000/api/online-books/{book.id}/view"
         img = qrcode.make(url)
-        path = os.path.join(app.config["UPLOAD_QRCODES"], f"online_{book.id}.png")
-        img.save(path)
-        book.qr_path = os.path.relpath(path, BASE_DIR)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        book.qr_path = storage.save_bytes(
+            buf.getvalue(), f"uploads/qrcodes/online_{book.id}.png", "image/png")
     except Exception as e:
         app.logger.warning(f"QR generation failed for online book {book.id}: {e}")
 
@@ -2928,12 +2967,8 @@ def purge_incomplete_books():
         (blocked if has_history else removable).append(b)
 
     for b in removable:
-        barcode_path = os.path.join(app.config["UPLOAD_BARCODES"], f"{b.accession_no}.png")
-        if os.path.exists(barcode_path):
-            try:
-                os.remove(barcode_path)
-            except OSError:
-                pass
+        # delete() ignores missing files and bad keys, so cleanup never fails the request.
+        storage.delete(b.barcode_path or f"uploads/barcodes/{secure_filename(b.accession_no)}.png")
         db.session.delete(b)
     db.session.commit()
 
