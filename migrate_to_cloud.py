@@ -233,6 +233,33 @@ def _foreign_key_checks(src, source_meta, table, column_names):
     return checks
 
 
+def _missing_column_defaults(source_table, table):
+    """{column name: value} for columns the target has and the source lacks,
+    where the model gives the column a plain Python-side default (for example
+    read_history.progress_seconds, default=0, which a PC database from before
+    that column existed does not have). Without this the new column would be
+    NULL on every migrated row, while the app only ever writes 0 there.
+
+    The target is read by reflection, and reflection does not carry
+    Python-side defaults, so they are looked up on the model of the same name.
+    Only a scalar default is used; a callable default (a date, a token) cannot
+    be known here and the column stays NULL, as before. models.py needs no
+    Flask app, so importing it does not break the "never import app.py" rule.
+    """
+    from models import db
+    model_table = db.metadata.tables.get(table.name)
+    if model_table is None:
+        return {}
+    defaults = {}
+    for column in table.columns:
+        if column.name in source_table.c or column.name not in model_table.c:
+            continue
+        default = model_table.c[column.name].default
+        if default is not None and getattr(default, "is_scalar", False):
+            defaults[column.name] = default.arg
+    return defaults
+
+
 def _copy_table(src, dst, source_meta, source_table, table, repairs) -> int:
     """Copy one table's rows. Rows with a dangling foreign key are repaired in
     memory as they pass through: a nullable reference (users.member_id) is set
@@ -242,6 +269,8 @@ def _copy_table(src, dst, source_meta, source_table, table, repairs) -> int:
     if not columns:
         return 0
     names = {c.name for c in columns}
+    # Columns only the target has, filled with the model's default (see above).
+    filled = _missing_column_defaults(source_table, table)
     bool_columns = {c.name for c in columns if isinstance(c.type, sa.Boolean)}
     checks = _foreign_key_checks(src, source_meta, table, names)
     skipped = {}   # parent table -> rows skipped
@@ -266,6 +295,7 @@ def _copy_table(src, dst, source_meta, source_table, table, repairs) -> int:
                 elif column.name in bool_columns:
                     value = _to_bool(value)
                 record[column.name] = value
+            record.update(filled)
             dangling = [
                 check for check in checks
                 if all(record[n] is not None for n in check["local"])

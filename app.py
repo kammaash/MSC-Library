@@ -450,6 +450,8 @@ app.config["MAX_FORM_PARTS"] = 5000  # generous headroom for large bulk-import b
 app.config["UPLOAD_BARCODES"] = os.path.join(BASE_DIR, "uploads", "barcodes")
 app.config["UPLOAD_QRCODES"] = os.path.join(BASE_DIR, "uploads", "qrcodes")
 app.config["UPLOAD_BACKUPS"] = os.path.join(BASE_DIR, "uploads", "backups")
+# Scratch space for incoming digital-library uploads (see _save_digital_upload).
+_UPLOAD_WORK_DIR = os.path.join(BASE_DIR, "upload_tmp")
 app.config["REPORTS_DIR"] = os.path.join(BASE_DIR, "reports", "pdf")
 
 # Online Books (PDF library) upload limits
@@ -2254,7 +2256,12 @@ def _save_digital_upload(file, subject_hint=None, category_hint=None, title_hint
     token = secrets.token_hex(6)
     stored_name = f"{token}_{safe_name}"
     saved_keys = []
-    tmp_dir = tempfile.mkdtemp(prefix="smartlib-upload-")
+    # The working copy lives next to uploads/ (not in the system temp
+    # folder) so that, in local mode, save_file(move=True) can rename it into
+    # place: a 400 MB video is then written once, and needs no free space on
+    # the system drive. In R2 mode the file is uploaded and removed below.
+    os.makedirs(_UPLOAD_WORK_DIR, exist_ok=True)
+    tmp_dir = tempfile.mkdtemp(prefix="smartlib-upload-", dir=_UPLOAD_WORK_DIR)
     try:
         source_path = os.path.join(tmp_dir, stored_name)
         file.save(source_path)
@@ -2269,13 +2276,15 @@ def _save_digital_upload(file, subject_hint=None, category_hint=None, title_hint
         os.makedirs(preview_dir)
         preview_source = _convert_to_pdf_preview(source_path, ext, preview_dir)
 
-        rel_path = storage.save_file(source_path, f"uploads/pdfs/{stored_name}", mime)
+        # move=True: nothing reads either temp file after this, and the
+        # finally below tolerates them being gone.
+        rel_path = storage.save_file(source_path, f"uploads/pdfs/{stored_name}", mime, move=True)
         saved_keys.append(rel_path)
         preview_pdf_rel = None
         if preview_source:
             stem = os.path.splitext(safe_name)[0]
             preview_pdf_rel = storage.save_file(
-                preview_source, f"uploads/pdfs/{token}_{stem}.pdf", "application/pdf")
+                preview_source, f"uploads/pdfs/{token}_{stem}.pdf", "application/pdf", move=True)
             saved_keys.append(preview_pdf_rel)
     except BaseException:
         for key in saved_keys:

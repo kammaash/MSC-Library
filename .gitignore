@@ -12,6 +12,7 @@ uploads/backups/*
 !uploads/backups/.gitkeep
 reports/
 logs/
+upload_tmp/
 
 # Secrets — the app generates this locally if LIBRARY_SECRET_KEY isn't set
 # in the environment; on Render, LIBRARY_SECRET_KEY is set directly instead,

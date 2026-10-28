@@ -147,6 +147,30 @@ def test_only_common_columns_are_copied(tmp_path, empty_target_db):
     assert _query(empty_target_db, "select member_id, title, awarded_date from certificates") == [("M1", "Star", None)]
 
 
+def test_column_missing_from_old_source_gets_the_model_default(seeded_source_db, empty_target_db):
+    # A PC database from before read_history.progress_seconds existed: the
+    # copied rows must get the model's default (0), not NULL.
+    engine = sa.create_engine(seeded_source_db)
+    with engine.begin() as conn:
+        conn.execute(sa.text("ALTER TABLE read_history DROP COLUMN progress_seconds"))
+    engine.dispose()
+    assert copy_database(seeded_source_db, empty_target_db)["read_history"] == 1
+    assert _query(empty_target_db, "select id, open_count, progress_seconds from read_history") == [(3, 2, 0)]
+
+
+def test_column_present_in_source_keeps_its_own_value_and_null(seeded_source_db, empty_target_db):
+    # The default only fills columns the source lacks; a value (or NULL) the
+    # source does have is copied as it is.
+    engine = sa.create_engine(seeded_source_db)
+    with engine.begin() as conn:
+        conn.execute(sa.text("UPDATE read_history SET progress_seconds = NULL"))
+        conn.execute(sa.text("INSERT INTO read_history (id, member_id, online_book_id, open_count, "
+                             "progress_seconds) VALUES (4, 'MEM-2', 7, 1, 95)"))
+    engine.dispose()
+    copy_database(seeded_source_db, empty_target_db)
+    assert _query(empty_target_db, "select id, progress_seconds from read_history order by id") == [(3, None), (4, 95)]
+
+
 def test_postgres_sequence_reset_sql_quotes_the_table():
     # The dialect alone is enough; no driver or connection needed.
     dialect = postgresql.dialect()

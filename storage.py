@@ -10,6 +10,7 @@ mode, so rows keep working when the app moves between the two.
 Legacy rows written on Windows contain backslashes (``uploads\\pdfs\\x.pdf``);
 normalize_key() converts those, and every method below runs its key through it.
 """
+import errno
 import os
 import shutil
 from typing import Mapping
@@ -62,12 +63,34 @@ class LocalStorage:
             raise ValueError(f"storage key escapes base directory: {key!r}")
         return path
 
-    def save_file(self, src_path: str, key: str, content_type: str | None = None) -> str:
+    def save_file(self, src_path: str, key: str, content_type: str | None = None,
+                  move: bool = False) -> str:
         key = normalize_key(key)
         dest = self.local_path(key)
         os.makedirs(os.path.dirname(dest), exist_ok=True)
-        # Copy, never move: the caller's source file is left untouched.
+        if move:
+            # Opt-in, for callers whose source is a throw-away temp file (a
+            # 400 MB video upload): renaming it into place means the disk
+            # never holds the file twice. os.replace only works inside one
+            # filesystem; when the temp dir is on another drive it raises
+            # EXDEV and we fall through to the copy below. After a move the
+            # source no longer exists, so a caller that still needs it, or
+            # that removes it afterwards, must handle that.
+            try:
+                os.replace(src_path, dest)
+                return key
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+        # Default: copy, never move; the caller's source file is left untouched
+        # (migrate_to_cloud.py relies on this for the PC's uploads folder).
         shutil.copyfile(src_path, dest)
+        if move:
+            # Cross-device "move": the copy succeeded, so drop the source too.
+            try:
+                os.remove(src_path)
+            except OSError:
+                pass
         return key
 
     def save_bytes(self, data: bytes, key: str, content_type: str | None = None) -> str:
@@ -111,7 +134,10 @@ class R2Storage:
         self.client = client
         self.bucket = bucket
 
-    def save_file(self, src_path: str, key: str, content_type: str | None = None) -> str:
+    def save_file(self, src_path: str, key: str, content_type: str | None = None,
+                  move: bool = False) -> str:
+        # `move` exists only so both classes share one interface; an upload to
+        # the bucket always leaves the source file where it was, so it is ignored.
         key = normalize_key(key)
         extra = {"ContentType": content_type} if content_type else None
         self.client.upload_file(src_path, self.bucket, key, ExtraArgs=extra)

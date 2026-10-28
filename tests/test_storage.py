@@ -1,3 +1,4 @@
+import errno
 import os
 
 import pytest
@@ -58,6 +59,45 @@ def test_local_save_file_copies_and_keeps_source(tmp_path):
     assert s.save_file(str(src), "uploads\\pdfs\\a.pdf") == "uploads/pdfs/a.pdf"
     assert src.read_bytes() == b"data"
     assert (base / "uploads" / "pdfs" / "a.pdf").read_bytes() == b"data"
+
+
+def test_local_save_file_move_leaves_no_source(tmp_path):
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"data")
+    base = tmp_path / "base"
+    s = LocalStorage(str(base))
+    assert s.save_file(str(src), "uploads/pdfs/a.pdf", move=True) == "uploads/pdfs/a.pdf"
+    assert not src.exists()
+    assert (base / "uploads" / "pdfs" / "a.pdf").read_bytes() == b"data"
+
+
+def test_local_save_file_move_falls_back_to_copy_across_filesystems(tmp_path, monkeypatch):
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"data")
+    base = tmp_path / "base"
+    s = LocalStorage(str(base))
+
+    def cross_device(*_args, **_kwargs):
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(os, "replace", cross_device)
+    assert s.save_file(str(src), "uploads/pdfs/a.pdf", move=True) == "uploads/pdfs/a.pdf"
+    assert (base / "uploads" / "pdfs" / "a.pdf").read_bytes() == b"data"
+    assert not src.exists()   # still a move from the caller's point of view
+
+
+def test_local_save_file_move_other_errors_are_not_swallowed(tmp_path, monkeypatch):
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"data")
+    s = LocalStorage(str(tmp_path / "base"))
+
+    def denied(*_args, **_kwargs):
+        raise OSError(errno.EACCES, "denied")
+
+    monkeypatch.setattr(os, "replace", denied)
+    with pytest.raises(OSError):
+        s.save_file(str(src), "uploads/pdfs/a.pdf", move=True)
+    assert src.read_bytes() == b"data"
 
 
 def test_local_delete_never_raises(tmp_path):

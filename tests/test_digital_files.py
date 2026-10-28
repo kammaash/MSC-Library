@@ -132,11 +132,11 @@ def test_second_save_failure_deletes_first_saved_key(client, r2, app_module, mon
     real_save = r2.save_file
     calls = []
 
-    def flaky(src, key, content_type=None):
+    def flaky(src, key, content_type=None, move=False):
         calls.append(key)
         if len(calls) == 2:
             raise OSError("network")
-        return real_save(src, key, content_type)
+        return real_save(src, key, content_type, move=move)
 
     monkeypatch.setattr(r2, "save_file", flaky)
     assert _upload(client, name="notes.docx", data=b"x").status_code == 500
@@ -242,10 +242,10 @@ def test_bulk_import_reports_storage_failure_and_keeps_others(client, r2, app_mo
     login_as(client, make_admin())
     real_save = r2.save_file
 
-    def flaky(src, key, content_type=None):
+    def flaky(src, key, content_type=None, move=False):
         if "bad" in key:
             raise OSError("network")
-        return real_save(src, key, content_type)
+        return real_save(src, key, content_type, move=move)
 
     monkeypatch.setattr(r2, "save_file", flaky)
     r = client.post("/api/online-books/bulk-import", content_type="multipart/form-data", data={
@@ -301,3 +301,18 @@ def test_view_with_src_app_does_not_log_read_history(client, app_module):
 
 def test_link_ttl_defaults_to_1800(app_module):
     assert app_module.LINK_TTL_SECONDS == 1800
+
+
+def test_local_upload_is_moved_into_place_not_copied(client, app_module, monkeypatch):
+    """The working copy sits next to uploads/ and is renamed into place, so a
+    large video is written once (audit item M10)."""
+    login_as(client, make_admin())
+    renames = []
+    real_replace = os.replace
+    monkeypatch.setattr(os, "replace", lambda a, b: renames.append((a, b)) or real_replace(a, b))
+    resp = _upload(client)
+    assert resp.status_code == 201
+    stored = os.path.join(app_module.BASE_DIR, *_pdf_path(app_module, resp.get_json()["id"]).split("/"))
+    assert [os.path.realpath(b) for _, b in renames] == [os.path.realpath(stored)]
+    assert renames[0][0].startswith(app_module._UPLOAD_WORK_DIR)
+    assert os.listdir(app_module._UPLOAD_WORK_DIR) == []
