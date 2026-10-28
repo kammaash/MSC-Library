@@ -77,6 +77,14 @@ def _has_integer_id(table):
 
 
 def _ensure_empty(engine, meta):
+    # A brand-new database has no tables until the app has started once
+    # against it. Without this check the copy would find nothing to copy into,
+    # skip every table, and still report success.
+    if "members" not in meta.tables:
+        raise RuntimeError(
+            "The target database has no SmartLib tables yet. Start the app once "
+            "against this DATABASE_URL (so it creates them), then run this script again."
+        )
     with engine.connect() as conn:
         occupied = [
             t.name for t in meta.sorted_tables

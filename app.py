@@ -683,7 +683,9 @@ def login():
     # is pure client-supplied input — anyone can set it via devtools or a
     # browser extension to get a "fresh" identity and bypass their own
     # lockout. request.remote_addr is the real TCP connection address and
-    # can't be spoofed the same way.
+    # can't be spoofed the same way. On Render, LIBRARY_TRUST_PROXY=1 turns on
+    # ProxyFix (see _apply_proxy_fix), which makes remote_addr the real client
+    # IP taken from Render's own proxy hop rather than the proxy's address.
     client_ip = request.remote_addr or "unknown"
 
     # Login throttling: after MAX_ATTEMPTS failed tries for this

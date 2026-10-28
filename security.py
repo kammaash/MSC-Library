@@ -94,8 +94,8 @@ def ensure_security_tables(db_path):
             CREATE TABLE IF NOT EXISTS login_rate_limits (
                 rate_key TEXT PRIMARY KEY,
                 fail_count INTEGER NOT NULL DEFAULT 0,
-                window_start REAL NOT NULL DEFAULT 0,
-                locked_until REAL
+                window_start DOUBLE PRECISION NOT NULL DEFAULT 0,
+                locked_until DOUBLE PRECISION
             )
         """)
         conn.commit()

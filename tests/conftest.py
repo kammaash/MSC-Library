@@ -32,7 +32,8 @@ os.environ["LIBRARY_DATA_DIR"] = _DATA_DIR
 # Tests must always run in offline/local mode, whatever the developer's shell
 # happens to have exported (a stray DATABASE_URL would point the suite at a
 # real Postgres database).
-_SCRUBBED_EXACT = {"DATABASE_URL", "PUBLIC_BASE_URL", "LIBRARY_LINK_TTL_SECONDS"}
+_SCRUBBED_EXACT = {"DATABASE_URL", "PUBLIC_BASE_URL", "LIBRARY_LINK_TTL_SECONDS",
+                  "LIBRARY_FORCE_HTTPS_COOKIES", "LIBRARY_TRUST_PROXY"}
 _SCRUBBED_PREFIXES = ("R2_", "ENTRA_")
 for _name in list(os.environ):
     if _name in _SCRUBBED_EXACT or _name.startswith(_SCRUBBED_PREFIXES):

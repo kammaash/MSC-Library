@@ -217,3 +217,22 @@ def test_main_refuses_non_empty_target_before_uploading(seeded_source_db, tmp_pa
         migrate_to_cloud.main(["--sqlite", seeded_source_db.removeprefix("sqlite:///"),
                                "--uploads", str(uploads)], env={"DATABASE_URL": seeded_source_db})
     assert r2.list_keys("uploads/") == []
+
+
+def test_target_without_tables_is_refused_before_uploading(tmp_path, r2, seeded_source_db, monkeypatch):
+    # A brand-new Neon database has no tables until the app has started once
+    # against it. Copying "into" it would silently do nothing and still report
+    # success, so it must fail up front, before any file is uploaded.
+    bare_target = f"sqlite:///{tmp_path / 'bare.db'}"
+    sa.create_engine(bare_target).dispose()
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    (uploads / "a.pdf").write_bytes(b"%PDF")
+    monkeypatch.setattr(migrate_to_cloud, "get_storage", lambda base_dir, env: r2)
+    with pytest.raises(RuntimeError, match="Start the app once") as exc:
+        migrate_to_cloud.main(["--sqlite", seeded_source_db.removeprefix("sqlite:///"),
+                               "--uploads", str(uploads)], env={"DATABASE_URL": bare_target})
+    assert "DATABASE_URL" in str(exc.value)
+    assert r2.list_keys("uploads/") == []
+    with pytest.raises(RuntimeError, match="Start the app once"):
+        migrate_to_cloud.ensure_target_empty(bare_target)
