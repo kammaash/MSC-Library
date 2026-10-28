@@ -11,8 +11,12 @@ PRECONDITION: run the app once against the Neon DATABASE_URL first, so that
 init_db() creates the (empty) tables — and do it BEFORE anyone completes
 /setup, because /setup writes rows and this script refuses to copy into a
 database that already has data. If any target table has rows the script stops
-before copying anything. The copy runs in one transaction, so a failure
-part-way leaves the target empty and the script can simply be run again.
+before copying anything.
+
+Order of work: check the target database is empty, upload the files, and only
+then copy the database rows (in one transaction). A failure at any step
+therefore leaves the target database empty, and the script can simply be run
+again; re-uploading the same file keys just overwrites them.
 
 This file deliberately does not import app.py: importing it would run
 init_db() against DATABASE_URL and start the cloud backup scheduler. Both
@@ -72,6 +76,32 @@ def _has_integer_id(table):
     return "id" in table.c and isinstance(table.c.id.type, sa.Integer)
 
 
+def _ensure_empty(engine, meta):
+    with engine.connect() as conn:
+        occupied = [
+            t.name for t in meta.sorted_tables
+            if conn.execute(sa.select(sa.func.count()).select_from(t)).scalar()
+        ]
+    if occupied:
+        raise RuntimeError(
+            "Target database is not empty (tables with rows: " + ", ".join(occupied)
+            + "). Run this before anyone completes /setup, against a freshly created database."
+        )
+
+
+def ensure_target_empty(target_url: str) -> None:
+    """Raise RuntimeError ("not empty", naming the tables) if any table in the
+    target database has rows. main() calls this before uploading files, so a
+    non-empty database is reported before anything has been changed."""
+    engine = sa.create_engine(target_url)
+    try:
+        meta = sa.MetaData()
+        meta.reflect(bind=engine)
+        _ensure_empty(engine, meta)
+    finally:
+        engine.dispose()
+
+
 def copy_database(source_url: str, target_url: str) -> dict:
     """Copy every table the target has (and the source also has) across.
 
@@ -87,16 +117,7 @@ def copy_database(source_url: str, target_url: str) -> dict:
         target_meta.reflect(bind=target_engine)
 
         # Check everything before writing anything.
-        with target_engine.connect() as conn:
-            occupied = [
-                t.name for t in target_meta.sorted_tables
-                if conn.execute(sa.select(sa.func.count()).select_from(t)).scalar()
-            ]
-        if occupied:
-            raise RuntimeError(
-                "Target database is not empty (tables with rows: " + ", ".join(occupied)
-                + "). Run this before anyone completes /setup, against a freshly created database."
-            )
+        _ensure_empty(target_engine, target_meta)
 
         counts = {}
         # One transaction: all tables are copied or none are.
@@ -204,13 +225,16 @@ def main(argv=None, env=os.environ) -> int:
         print(f"Uploads folder not found: {args.uploads}", file=sys.stderr)
         return 2
 
+    # Files first, database last: the database copy is the step that makes the
+    # target non-empty, so if the upload fails the script can just be re-run.
+    ensure_target_empty(database_url)
+    print("Copying uploaded files (uploads/backups/ is skipped)...")
+    files = copy_uploads(args.uploads, storage)
+    print(f"  {files} files")
     print("Copying database rows...")
     counts = copy_database("sqlite:///" + os.path.abspath(args.sqlite), database_url)
     for name, n in counts.items():
         print(f"  {name}: {n} rows")
-    print("Copying uploaded files (uploads/backups/ is skipped)...")
-    files = copy_uploads(args.uploads, storage)
-    print(f"  {files} files")
     print("Done.")
     return 0
 

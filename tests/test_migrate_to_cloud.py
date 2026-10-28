@@ -181,3 +181,39 @@ def test_main_requires_r2(tmp_path, capsys):
                                  env={"DATABASE_URL": "postgres://u:p@h/db"})
     assert code == 2
     assert "R2" in capsys.readouterr().err
+
+
+def test_main_upload_failure_leaves_database_empty_and_rerun_works(
+        seeded_source_db, empty_target_db, tmp_path, r2, monkeypatch):
+    uploads = tmp_path / "uploads"
+    (uploads / "pdfs").mkdir(parents=True)
+    (uploads / "pdfs" / "old.pdf").write_bytes(b"%PDF")
+    monkeypatch.setattr(migrate_to_cloud, "get_storage", lambda base_dir, env: r2)
+    argv = ["--sqlite", seeded_source_db.removeprefix("sqlite:///"), "--uploads", str(uploads)]
+    env = {"DATABASE_URL": empty_target_db}
+
+    real_copy_uploads = migrate_to_cloud.copy_uploads
+
+    def failing(*args, **kwargs):
+        raise OSError("network down")
+
+    monkeypatch.setattr(migrate_to_cloud, "copy_uploads", failing)
+    with pytest.raises(OSError):
+        migrate_to_cloud.main(argv, env=env)
+    assert _query(empty_target_db, "select count(*) from online_books") == [(0,)]
+
+    monkeypatch.setattr(migrate_to_cloud, "copy_uploads", real_copy_uploads)
+    assert migrate_to_cloud.main(argv, env=env) == 0
+    assert _query(empty_target_db, "select count(*) from online_books") == [(1,)]
+    assert r2.list_keys("uploads/") == ["uploads/pdfs/old.pdf"]
+
+
+def test_main_refuses_non_empty_target_before_uploading(seeded_source_db, tmp_path, r2, monkeypatch, capsys):
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    (uploads / "a.pdf").write_bytes(b"%PDF")
+    monkeypatch.setattr(migrate_to_cloud, "get_storage", lambda base_dir, env: r2)
+    with pytest.raises(RuntimeError, match="not empty"):
+        migrate_to_cloud.main(["--sqlite", seeded_source_db.removeprefix("sqlite:///"),
+                               "--uploads", str(uploads)], env={"DATABASE_URL": seeded_source_db})
+    assert r2.list_keys("uploads/") == []
