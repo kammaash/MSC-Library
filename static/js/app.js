@@ -744,10 +744,13 @@ const FILE_TYPE_ICON = { pdf: '📄', epub: '📖', doc: '📝', docx: '📝', p
 let ONLINE_BOOKS_CACHE = [];
 
 document.getElementById('addOnlineBookBtn').style.display = IS_STAFF ? '' : 'none';
+// Students see their own class's books by default; this lifts that filter.
+document.getElementById('onlineAllGradesWrap').style.display = IS_STUDENT ? '' : 'none';
 
 async function loadOnlineBooks() {
   const q = document.getElementById('onlineSearch').value;
-  const books = await api('/api/online-books?q=' + encodeURIComponent(q));
+  const allGrades = IS_STUDENT && document.getElementById('onlineAllGrades').checked;
+  const books = await api('/api/online-books?q=' + encodeURIComponent(q) + (allGrades ? '&all_grades=1' : ''));
   ONLINE_BOOKS_CACHE = books;
 
   if (IS_STUDENT) {
@@ -875,6 +878,7 @@ function renderOnlineBooks() {
       <h4>${icon} ${escapeHtml(b.title)}</h4>
       <p>${escapeHtml(b.author || '')}${b.author ? ' · ' : ''}${escapeHtml(b.subject || '')}
         ${b.category ? `<br><span class="tag" style="background:var(--parchment-dark); color:var(--navy);">${escapeHtml(b.category)}</span>` : ''}
+        ${IS_STAFF && b.grade_target ? `<span class="tag" style="background:var(--parchment-dark); color:var(--navy);">Class ${b.grade_target}</span>` : ''}
         <br><span class="hint">${label}${sizeStr ? ' · ' + sizeStr : ''}${officeConverted ? ' · readable in-browser' : ''}${b.ocr_applied ? ' · OCR text indexed' : ''}</span></p>
       <div class="io-row">
         ${actionBtn}
@@ -890,6 +894,7 @@ function renderOnlineBooks() {
 }
 
 document.getElementById('onlineSearch').addEventListener('input', loadOnlineBooks);
+document.getElementById('onlineAllGrades').addEventListener('change', loadOnlineBooks);
 document.getElementById('onlineCategoryFilter').addEventListener('change', renderOnlineBooks);
 document.getElementById('onlineGenreFilter').addEventListener('change', renderOnlineBooks);
 document.getElementById('onlineTypeFilter').addEventListener('change', renderOnlineBooks);
@@ -1259,6 +1264,14 @@ document.getElementById('onlineGrid').addEventListener('click', async e => {
   }
 });
 
+// "All classes" plus Class 1-12; the value is what the server's grade_target expects.
+function gradeSelect(id, selected) {
+  return `<select id="${id}"><option value="">All classes</option>` +
+    Array.from({ length: 12 }, (_, i) => i + 1)
+      .map(g => `<option value="${g}"${g === selected ? ' selected' : ''}>Class ${g}</option>`).join('') +
+    `</select>`;
+}
+
 function onlineBookForm(existing) {
   return `
     <h3>${existing ? 'Edit Item' : 'Add to Digital Library'}</h3>
@@ -1283,6 +1296,9 @@ function onlineBookForm(existing) {
           .filter((v, i, arr) => arr.indexOf(v) === i)
           .map(s => `<option value="${escapeHtml(s)}">`).join('')}
       </datalist>
+      <label>Class <span class="hint">(students see books for their own class by default)</span>
+        ${gradeSelect('ob_grade', existing ? existing.grade_target : null)}
+      </label>
       <label>${existing ? 'Replace File (optional)' : 'File *'}
         <input type="file" id="ob_file" accept=".pdf,.epub,.doc,.docx,.ppt,.pptx,.mp4,.webm,.mp3,.wav,.m4a" ${existing ? '' : 'required'}>
       </label>
@@ -1317,6 +1333,7 @@ function openOnlineBookForm(existing) {
     fd.append('author', document.getElementById('ob_author').value);
     fd.append('subject', document.getElementById('ob_subject').value);
     fd.append('category', document.getElementById('ob_category').value);
+    fd.append('grade_target', document.getElementById('ob_grade').value);
     if (file) fd.append('file', file);
 
     const progressWrap = document.getElementById('ob_progress_wrap');
@@ -1362,8 +1379,11 @@ document.getElementById('bulkImportOnlineInput').addEventListener('change', asyn
     `Optional: one Category (genre, e.g. Fiction, Comic) to apply to all of them, or leave blank.`, '') || '';
   const subject = prompt(
     `Optional: one Subject (academic, e.g. Maths, Physics) to apply to all of them, or leave blank.`, '') || '';
+  const grade = prompt(
+    `Optional: one Class (1-12) to aim all of them at, or leave blank for all classes.`, '') || '';
   const fd = new FormData();
   files.forEach(f => fd.append('files', f));
+  if (grade.trim()) fd.append('grade_target', grade.trim());
   if (subject.trim()) fd.append('subject', subject.trim());
   if (category.trim()) fd.append('category', category.trim());
 

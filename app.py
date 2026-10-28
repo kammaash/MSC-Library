@@ -1691,6 +1691,46 @@ def _delete_online_book_files(book, include_qr=True):
         storage.delete(key)
 
 
+# --------------------------------------------------------------------------
+# Books for my class — a digital item can be aimed at one school grade (1-12).
+# --------------------------------------------------------------------------
+
+_ROMAN_GRADES = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6,
+                 "VII": 7, "VIII": 8, "IX": 9, "X": 10, "XI": 11, "XII": 12}
+# "7-A", "7A", "12 Science", "Class 10", "Std XII", "VII-B": an optional
+# Class/Std/Standard prefix, then a leading Arabic number or Roman numeral.
+# The Roman token must stand alone (so "Vision" is not Class V) and the
+# Arabic one must not run into another digit (so "100" is not Class 10).
+_GRADE_RE = re.compile(r"^\s*(?:(?:class|std|standard)\.?\s*)?(?:(\d{1,2})(?!\d)|([ivx]+)(?![a-z0-9]))", re.I)
+
+
+def _grade_from_class(class_dept):
+    """
+    Turn a member's class text (free-form: "7-A", "VII", "Class 10", "Std XII")
+    into a grade 1-12, or None when it doesn't start with one (e.g. "LKG",
+    a staff department). None means "don't filter" to the caller.
+    """
+    m = _GRADE_RE.match(class_dept or "")
+    if not m:
+        return None
+    grade = int(m.group(1)) if m.group(1) else _ROMAN_GRADES.get(m.group(2).upper())
+    return grade if grade and 1 <= grade <= 12 else None
+
+
+def _parse_grade_target(raw):
+    """Form value -> grade 1-12, or None for blank ("All classes"). Raises ValueError otherwise."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        grade = int(raw)
+    except ValueError:
+        grade = 0
+    if not 1 <= grade <= 12:
+        raise ValueError("Class must be between 1 and 12.")
+    return grade
+
+
 @app.route("/api/online-books", methods=["GET"])
 @login_required
 def list_online_books():
@@ -1698,6 +1738,14 @@ def list_online_books():
     subject_filter = (request.args.get("subject") or "").strip()
     category_filter = (request.args.get("category") or "").strip()
     books = OnlineBook.query.all()
+    # A student sees books for their own class (plus untargeted ones) unless
+    # they tick "Show books for all classes". Staff always see everything, and
+    # so does a student whose class text doesn't name a grade.
+    member = _current_student_member()
+    if member and request.args.get("all_grades") != "1":
+        grade = _grade_from_class(member.class_dept)
+        if grade is not None:
+            books = [b for b in books if b.grade_target is None or b.grade_target == grade]
     if subject_filter:
         books = [b for b in books if (b.subject or "") == subject_filter]
     if category_filter:
@@ -1881,6 +1929,10 @@ def add_online_book():
     author = (request.form.get("author") or "").strip()
     subject = (request.form.get("subject") or "").strip()
     category = (request.form.get("category") or "").strip()
+    try:
+        grade_target = _parse_grade_target(request.form.get("grade_target"))
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
 
     if "file" not in request.files or not request.files["file"].filename:
         return jsonify({"error": "Please choose a file to upload."}), 400
@@ -1896,6 +1948,7 @@ def add_online_book():
     try:
         if author:
             book.author = author
+        book.grade_target = grade_target
         db.session.add(book)
         db.session.flush()  # need book.id before generating its QR code
         _generate_qr_for_online_book(book)
@@ -1913,6 +1966,14 @@ def add_online_book():
 def edit_online_book(book_id):
     """Update title/author/subject, and optionally replace the file itself."""
     book = OnlineBook.query.get_or_404(book_id)
+
+    # Validate before touching the record. A form that omits grade_target
+    # leaves the class as it was; an empty value means "All classes".
+    if "grade_target" in request.form:
+        try:
+            book.grade_target = _parse_grade_target(request.form["grade_target"])
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
 
     title = (request.form.get("title") or "").strip()
     if title:
@@ -1987,6 +2048,10 @@ def bulk_import_online_books():
 
     shared_subject = (request.form.get("subject") or "").strip() or None
     shared_category = (request.form.get("category") or "").strip() or None
+    try:
+        shared_grade = _parse_grade_target(request.form.get("grade_target"))
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
     created, skipped = 0, []
     for f in files:
         if not f.filename:
@@ -1994,6 +2059,7 @@ def bulk_import_online_books():
         book = None
         try:
             book = _save_digital_upload(f, subject_hint=shared_subject, category_hint=shared_category)
+            book.grade_target = shared_grade
             db.session.add(book)
             db.session.flush()
             _generate_qr_for_online_book(book)

@@ -287,6 +287,7 @@ class OnlineBook(db.Model):
             "ocr_applied": self.ocr_applied,
             "qr_path": self.qr_path,
             "has_content_text": bool(self.content_text),
+            "grade_target": self.grade_target,
         }
 
 
