@@ -14,6 +14,7 @@ def fresh(app_module, monkeypatch):
     with app_module.app.app_context():
         app_module.db.session.execute(text("DELETE FROM app_security WHERE key = 'setup_complete'"))
         app_module.db.session.commit()
+    security.clear_caches()
     monkeypatch.setattr(app_module, "_SETUP_COMPLETE_CACHE", False)
     return app_module
 

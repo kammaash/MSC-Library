@@ -91,6 +91,9 @@ def db_reset(app_module):
         db.session.execute(text("DELETE FROM login_rate_limits"))
         db.session.execute(text("DELETE FROM user_security_flags"))
         db.session.commit()
+        # security.py caches both tables per process; the rows just went
+        # behind its back.
+        security.clear_caches()
     yield
 
 

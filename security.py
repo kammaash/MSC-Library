@@ -41,12 +41,28 @@ import threading
 _DATABASE_URL = os.environ.get("DATABASE_URL")
 
 
+# Set by app.py (use_engine) to the SQLAlchemy engine the rest of the app
+# uses. Connections are then borrowed from its pool instead of opened fresh:
+# on Neon every new connection is a TLS handshake, and this module used to
+# open one to three of them on every page. close() hands a borrowed
+# connection back to the pool, which rolls back anything left uncommitted.
+_engine = None
+
+
+def use_engine(engine):
+    global _engine
+    _engine = engine
+
+
 def _get_connection(db_path):
     """
     Returns a DB-API connection to whichever database the app is actually
     using: psycopg2/Postgres in production (DATABASE_URL set), or the same
-    sqlite3/db_path as always for local development.
+    sqlite3/db_path as always for local development. Borrowed from the app's
+    pool once use_engine() has been called.
     """
+    if _engine is not None:
+        return _engine.raw_connection()
     if _DATABASE_URL:
         import psycopg2
         return psycopg2.connect(_DATABASE_URL)
@@ -103,16 +119,40 @@ def ensure_security_tables(db_path):
         conn.close()
 
 
+# In-process caches for values read on (nearly) every request: the
+# app_security flags (school name and address, shown on every page) and each
+# user's must_change_password flag (checked before every signed-in request).
+# Every write goes through this module, which updates or drops the cached
+# entry, so they stay correct as long as one process owns the database —
+# which the deployment requires anyway (gunicorn --workers 1; a LAN install
+# is one waitress process). Anything that changes these tables behind this
+# module's back (tests, a manual SQL fix) must call clear_caches().
+_MISSING = object()
+_flag_cache = {}
+_must_change_cache = {}
+
+
+def clear_caches():
+    _flag_cache.clear()
+    _must_change_cache.clear()
+
+
 def _get_flag(db_path, key, default=None):
+    cached = _flag_cache.get(key, _MISSING)
+    if cached is not _MISSING:
+        return default if cached is None else cached
     conn = _get_connection(db_path)
     try:
         row = _exec(conn, "SELECT value FROM app_security WHERE key = ?", (key,)).fetchone()
-        return row[0] if row else default
     finally:
         conn.close()
+    value = row[0] if row else None
+    _flag_cache[key] = value
+    return default if value is None else value
 
 
 def _set_flag(db_path, key, value):
+    _flag_cache.pop(key, None)
     conn = _get_connection(db_path)
     try:
         _exec(
@@ -153,6 +193,7 @@ def get_school_address(db_path, fallback="A-camp, Kurnool"):
 # Forced "must change password" flag
 # --------------------------------------------------------------------------
 def set_must_change_password(db_path, user_id, flag=True):
+    _must_change_cache.pop(user_id, None)
     conn = _get_connection(db_path)
     try:
         _exec(
@@ -167,12 +208,32 @@ def set_must_change_password(db_path, user_id, flag=True):
 
 
 def must_change_password(db_path, user_id):
+    cached = _must_change_cache.get(user_id)
+    if cached is not None:
+        return cached
     conn = _get_connection(db_path)
     try:
         row = _exec(
             conn, "SELECT must_change_password FROM user_security_flags WHERE user_id = ?", (user_id,)
         ).fetchone()
-        return bool(row and row[0])
+    finally:
+        conn.close()
+    _must_change_cache[user_id] = bool(row and row[0])
+    return _must_change_cache[user_id]
+
+
+def forget_user(db_path, user_id):
+    """
+    Removes a deleted account's row and cached flag. Without it the row
+    outlives the account, and because a new account can be given the same
+    id (SQLite reuses the highest id after a delete), the new account would
+    inherit the old one's "must change password" state.
+    """
+    _must_change_cache.pop(user_id, None)
+    conn = _get_connection(db_path)
+    try:
+        _exec(conn, "DELETE FROM user_security_flags WHERE user_id = ?", (user_id,))
+        conn.commit()
     finally:
         conn.close()
 

@@ -270,6 +270,7 @@ def _apply_proxy_fix(flask_app, env) -> bool:
 
 
 _apply_proxy_fix(app, os.environ)
+
 app.config["SECRET_KEY"] = _get_or_create_secret_key()
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 # A LAN deployment (the normal case) is plain HTTP — forcing Secure
@@ -663,6 +664,9 @@ def _handle_unexpected_error(e):
     raise e
 
 db.init_app(app)
+# security.py borrows connections from this engine's pool (see use_engine).
+with app.app_context():
+    security.use_engine(db.engine)
 
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
