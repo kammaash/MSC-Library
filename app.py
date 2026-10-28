@@ -240,6 +240,29 @@ if _TEMPLATE_FOLDER:
     app = Flask(__name__, template_folder=_TEMPLATE_FOLDER, static_folder=_STATIC_FOLDER)
 else:
     app = Flask(__name__)
+
+
+def _apply_proxy_fix(flask_app, env) -> bool:
+    """Trust one reverse proxy's X-Forwarded-* headers, only when asked to.
+
+    Returns True when ProxyFix was applied. Off by default on purpose: on a
+    school LAN nothing sits in front of the app, so X-Forwarded-For is pure
+    client-supplied input and trusting it would let anyone dodge their login
+    lockout by faking a new address (see the comment in login(), which stays
+    true for those installs). On Render every request arrives via Render's
+    proxy, so without this request.remote_addr would be the proxy's address
+    for everybody and one student's failed attempts would lock out the whole
+    school. The deployment sets LIBRARY_TRUST_PROXY=1 and the app can then
+    only be reached through that proxy, which sets the headers itself.
+    """
+    if env.get("LIBRARY_TRUST_PROXY") != "1":
+        return False
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    flask_app.wsgi_app = ProxyFix(flask_app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+    return True
+
+
+_apply_proxy_fix(app, os.environ)
 app.config["SECRET_KEY"] = _get_or_create_secret_key()
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 # A LAN deployment (the normal case) is plain HTTP — forcing Secure
