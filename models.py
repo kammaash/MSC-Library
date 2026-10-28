@@ -96,6 +96,15 @@ class Member(db.Model):
     # semi-public — so it shouldn't be the only thing standing between
     # an internet-facing login page and a student's account.
     pin_hash = db.Column(db.String(255))
+    # School Microsoft account address, stored lowercased. Used to match a
+    # Microsoft sign-in to a Member. Uniqueness is enforced in application
+    # code, not by the database, so adding the column to an existing
+    # database stays a plain ALTER TABLE ... ADD COLUMN.
+    email = db.Column(db.String(254))
+    # Entra ID object id ("oid" claim), recorded on a student's first
+    # Microsoft sign-in so later sign-ins match on a stable identifier
+    # rather than an email address that can be renamed.
+    entra_oid = db.Column(db.String(64))
 
     def to_dict(self):
         active_loans = Issue.query.filter_by(member_id=self.member_id, status="Active").count()
@@ -262,6 +271,8 @@ class OnlineBook(db.Model):
     # read in-browser like a normal PDF, instead of forcing a download.
     # Only populated when LibreOffice is installed on the host PC — see docs.
     preview_pdf_path = db.Column(db.String(255))
+    # School grade (1-12) this item is meant for; NULL means every class.
+    grade_target = db.Column(db.Integer)
 
     def to_dict(self):
         return {
@@ -323,6 +334,8 @@ class ReadHistory(db.Model):
     first_opened = db.Column(db.String(10))
     last_opened = db.Column(db.String(10))
     open_count = db.Column(db.Integer, default=1)
+    # Where the student got to in a video/audio item, so it can resume.
+    progress_seconds = db.Column(db.Integer, default=0)
 
 
 class Certificate(db.Model):

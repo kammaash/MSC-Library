@@ -32,6 +32,7 @@ from flask_login import (
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import inspect as sa_inspect, text as sa_text
 
 from models import (
     db, User, Book, Member, Issue, FinePayment, LostBook, StockCheck,
@@ -3006,60 +3007,74 @@ def _enable_multi_user_mode():
 
 def _auto_migrate_schema():
     """
-    Runs on every app startup, before anything else touches the database.
-    Compares the actual database.db against what models.py currently
+    Runs on every app startup, right after db.create_all(), inside an app
+    context. Compares the live database against what models.py currently
     declares, and adds any missing columns automatically. This is what
-    makes the app self-healing if database.db was created by an older
+    makes the app self-healing if the database was created by an older
     version of models.py — no manual migration script to remember to run.
     Never removes a column or touches existing data; only ever adds.
-    """
-    import sqlite3
-    db_path = os.path.join(BASE_DIR, "database.db")
-    if not os.path.exists(db_path):
-        return  # nothing to reconcile yet — db.create_all() will build it fresh
 
-    sqlite_type_map = {
-        "INTEGER": "INTEGER", "VARCHAR": "TEXT", "TEXT": "TEXT",
-        "BOOLEAN": "BOOLEAN", "FLOAT": "FLOAT", "DATE": "TEXT", "DATETIME": "TEXT",
-    }
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
+    Works on whichever database db.engine points at (the local SQLite file
+    or Postgres on Neon): it asks SQLAlchemy's inspector what exists
+    rather than opening the SQLite file directly, and takes each column's
+    type from the model compiled for the engine's own dialect.
+
+    Returns the "table.column" names it added (empty when the schema was
+    already current). Failures are logged and never stop startup.
+    """
     added = []
     try:
+        dialect = db.engine.dialect
+        quote = dialect.identifier_preparer.quote
+        inspector = sa_inspect(db.engine)
+        existing_tables = set(inspector.get_table_names())
         for mapper in db.Model.registry.mappers:
             table_name = mapper.class_.__tablename__
-            cur.execute(f"PRAGMA table_info({table_name})")
-            existing_cols = {row[1] for row in cur.fetchall()}
-            if not existing_cols:
-                continue  # table doesn't exist yet — db.create_all() handles that
+            if table_name not in existing_tables:
+                continue  # db.create_all() builds missing tables, columns and all
+            existing_cols = {c["name"] for c in inspector.get_columns(table_name)}
             for col in mapper.columns:
                 if col.name in existing_cols:
                     continue
-                sqlite_type = sqlite_type_map.get(str(col.type).split("(")[0].upper(), "TEXT")
+                col_type = col.type.compile(dialect=dialect)
                 default_clause = ""
                 if col.default is not None and getattr(col.default, "arg", None) is not None:
                     dv = col.default.arg
                     if isinstance(dv, str):
-                        default_clause = f" DEFAULT '{dv}'"
+                        escaped = dv.replace("'", "''")
+                        default_clause = f" DEFAULT '{escaped}'"
                     elif isinstance(dv, bool):
-                        default_clause = f" DEFAULT {1 if dv else 0}"
+                        # SQLite stores booleans as 0/1; Postgres has a real
+                        # boolean type and rejects DEFAULT 1 for it.
+                        if dialect.name == "sqlite":
+                            default_clause = f" DEFAULT {1 if dv else 0}"
+                        else:
+                            default_clause = f" DEFAULT {'TRUE' if dv else 'FALSE'}"
                     elif isinstance(dv, (int, float)):
                         default_clause = f" DEFAULT {dv}"
-                cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {col.name} {sqlite_type}{default_clause}")
-                added.append(f"{table_name}.{col.name}")
-        conn.commit()
+                # One transaction per column, so one failure can't block the rest.
+                try:
+                    with db.engine.begin() as conn:
+                        conn.execute(sa_text(
+                            f"ALTER TABLE {quote(table_name)} "
+                            f"ADD COLUMN {quote(col.name)} {col_type}{default_clause}"
+                        ))
+                    added.append(f"{table_name}.{col.name}")
+                except Exception as e:
+                    app.logger.warning(
+                        f"Auto-migration could not add {table_name}.{col.name} (non-fatal): {e}"
+                    )
     except Exception as e:
         app.logger.warning(f"Auto-migration check failed (non-fatal): {e}")
-    finally:
-        conn.close()
     if added:
         app.logger.info(f"Auto-migration added missing column(s): {', '.join(added)}")
+    return added
 
 
 def init_db():
-    _auto_migrate_schema()
     with app.app_context():
         db.create_all()
+        _auto_migrate_schema()
         _enable_multi_user_mode()
         security.ensure_security_tables(DB_PATH)
         # NOTE: this used to auto-create admin/admin123, librarian/lib123,
