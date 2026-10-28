@@ -131,11 +131,22 @@ choose their own account.
    the four `R2_*`, and the three `ENTRA_*`.
 5. Deploy. The first start creates the empty database tables in Neon.
 
-Do not open `/setup` yet if you need step 5 (migration).
+**Create the admin account right away, unless you are migrating.** The
+`/setup` page is open to anyone until the first admin exists, and the
+`*.onrender.com` address is public from the moment the deploy finishes.
+Whoever reaches `/setup` first becomes the admin. So:
+
+- **Starting fresh (no data to migrate):** as soon as the deploy is live, open
+  `https://<your-service>.onrender.com/setup` and create the admin account
+  before doing anything else.
+- **Migrating the library PC's data (step 5):** do **not** open `/setup`; the
+  migration needs the database to be empty. Do step 5 immediately after the
+  deploy, without leaving the service unattended for long, and sign in with
+  the PC's existing admin account afterwards.
 
 ## 5. Move the library PC's existing data (only if it has real data)
 
-Skip this step for a fresh start.
+Skip this step for a fresh start (then you created the admin in step 4).
 
 Run this on a computer that has the library PC's `database.db` and its
 `uploads/` folder (copy them off the PC first; do not change the originals).
@@ -153,6 +164,11 @@ It uploads the files first, then copies the rows in one transaction. If it
 fails part-way the database is still empty and you can run it again. Old
 `uploads/backups/` files are not copied. Afterwards, sign in with the PC's
 existing admin account instead of using `/setup`.
+
+**Then fix the QR codes.** The QR codes copied from the PC point at the old
+school-network address. Sign in as admin, open **QR Code Library**, and press
+**Fix QR Codes Not Opening on Phones**. This rebuilds every QR code so it
+points at `library.msceducation.net` (it uses `PUBLIC_BASE_URL`).
 
 ## 6. Before go-live: staging check
 
@@ -216,17 +232,26 @@ each item in order.
 
 ## 8. First run
 
-Open `https://library.msceducation.net/setup` and create the admin account.
-Skip this if you migrated data in step 5. Confirm the address shows the login
-page with a valid certificate (padlock).
+If you started fresh, you already created the admin account at the end of
+step 4; do not leave `/setup` open any longer than that. If you migrated data
+(step 5), sign in with the PC's existing admin account. Either way, confirm
+`https://library.msceducation.net` shows the login page with a valid
+certificate (padlock).
+
+The school logo: a logo uploaded through the app is saved on Render's
+temporary disk and is lost at the next redeploy or restart. To make a logo
+permanent, commit the image to the repository as `static/images/logo_main.png`.
 
 ## 9. Recovery
 
-- First line of defence: Neon's point-in-time restore window. Restore from the
-  Neon dashboard if data is damaged or deleted.
+- There is **no restore button in the app**. Neon's point-in-time restore is
+  the recovery path: restore from the Neon dashboard if data is damaged or
+  deleted.
 - Admin, Backup Now creates a JSON export of the data in R2 (under
   `uploads/backups/`) and the app also makes one automatically each day. The
-  files can be downloaded from View Backups.
+  files can be downloaded from View Backups. The JSON export is the school's
+  own readable copy of its data (to look things up or keep as a record); it
+  cannot be loaded back into the app.
 - Download one backup **monthly** and keep it somewhere outside these cloud
   accounts (for example a school drive). A cloud account problem would
   otherwise take the data and the backups together.
