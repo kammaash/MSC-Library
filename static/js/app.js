@@ -1214,20 +1214,33 @@ async function openMediaViewer(id, type, title) {
   closeMediaViewer();
   const session = viewerSession;
 
+  // Show the overlay straight away: on slow Wi-Fi the link request can take a
+  // while and the student would otherwise see nothing happen after clicking.
+  // Close works in this state too; it bumps viewerSession, so the staleness
+  // checks below then drop the pending result.
+  wrap.innerHTML = `<div class="pdf-bar"><span>${escapeHtml(title)}</span><button class="ghost" id="closePdfBtn">✕ Close</button></div>
+    <p class="viewer-loading" role="status">Loading…</p>`;
+  document.getElementById('closePdfBtn').addEventListener('click', closeMediaViewer);
+  document.getElementById('pdfViewerOverlay').classList.add('show');
+
   let result;
   try {
     result = await fetchViewerLink(id, false);
   } catch (e) {
+    if (session !== viewerSession) return;
+    closeMediaViewer();
     toast('Could not open this item. Check your connection and try again.', true);
     return;
   }
   if (session !== viewerSession) return;
   if (result.status === 401) {
     // Signed out: send them to sign in rather than showing an error toast.
+    closeMediaViewer();
     window.location.href = '/login';
     return;
   }
   if (!result.ok) {
+    closeMediaViewer();
     toast((result.data && result.data.error) || 'Could not open this item.', true);
     return;
   }
@@ -1243,7 +1256,7 @@ async function openMediaViewer(id, type, title) {
       <iframe id="pdfFrame" src="${escapeHtml(url)}#toolbar=0&navpanes=0"></iframe>`;
   } else if (['mp4', 'webm'].includes(type)) {
     wrap.innerHTML = `<div class="pdf-bar"><span>${escapeHtml(title)}</span><button class="ghost" id="closePdfBtn">✕ Close</button></div>
-      <video src="${escapeHtml(url)}" controls autoplay controlsList="nodownload noremoteplayback" disablePictureInPicture style="width:100%; max-height:80vh; background:#000; border-radius:6px;"></video>`;
+      <video src="${escapeHtml(url)}" controls autoplay controlsList="nodownload noremoteplayback" disablePictureInPicture class="viewer-video" style="width:100%; background:#000; border-radius:6px;"></video>`;
     media = wrap.querySelector('video');
   } else if (['mp3', 'wav', 'm4a'].includes(type)) {
     wrap.innerHTML = `<div class="pdf-bar"><span>${escapeHtml(title)}</span><button class="ghost" id="closePdfBtn">✕ Close</button></div>
@@ -1258,6 +1271,7 @@ async function openMediaViewer(id, type, title) {
     loadEpubReader(url);
   } else {
     // Office/legacy formats: browsers can't render these — just download them.
+    closeMediaViewer();   // drop the "Loading…" overlay; nothing will replace it
     window.location.href = url;
     return;
   }
@@ -1278,8 +1292,8 @@ async function openMediaViewer(id, type, title) {
     });
     if (TIMED_MEDIA_TYPES.includes(type)) scheduleRenewWarning(link, session);
   }
+  // The wrap was rebuilt above, so the close button is a new element.
   document.getElementById('closePdfBtn').addEventListener('click', closeMediaViewer);
-  document.getElementById('pdfViewerOverlay').classList.add('show');
 }
 
 function closeMediaViewer() {
@@ -1311,7 +1325,7 @@ function loadEpubReader(url) {
     const s2 = document.createElement('script');
     s2.src = '/static/vendor/epub.min.js';
     s2.onload = () => { EPUBJS_LOADED = true; render(); };
-    s2.onerror = () => { document.getElementById('epubArea').innerHTML = '<p class="hint" style="padding:20px;">Could not load the EPUB reader. <a href="' + url + '">Download the file instead</a>.</p>'; };
+    s2.onerror = () => { document.getElementById('epubArea').innerHTML = '<p class="hint" style="padding:20px;">Could not load the EPUB reader. <a href="' + escapeHtml(url) + '">Download the file instead</a>.</p>'; };
     document.head.appendChild(s2);
   };
   document.head.appendChild(s1);
@@ -1489,8 +1503,22 @@ document.getElementById('bulkImportOnlineInput').addEventListener('change', asyn
     `Optional: one Category (genre, e.g. Fiction, Comic) to apply to all of them, or leave blank.`, '') || '';
   const subject = prompt(
     `Optional: one Subject (academic, e.g. Maths, Physics) to apply to all of them, or leave blank.`, '') || '';
-  const grade = prompt(
-    `Optional: one Class (1-12) to aim all of them at, or leave blank for all classes.`, '') || '';
+  // Ask again until the answer is something the server accepts (blank = all
+  // classes, or a whole number 1-12), so a typo doesn't cost the user re-picking
+  // every file. Cancel aborts the whole import.
+  let grade = '';
+  for (;;) {
+    const answer = prompt(
+      `Optional: one Class (1-12) to aim all of them at, or leave blank for all classes.` +
+      (grade ? `\n\n"${grade}" is not a class. Enter a whole number from 1 to 12, or leave blank.` : ''), '');
+    if (answer === null) { e.target.value = ''; return; }
+    const trimmed = answer.trim();
+    if (trimmed === '' || (/^\d{1,2}$/.test(trimmed) && +trimmed >= 1 && +trimmed <= 12)) {
+      grade = trimmed === '' ? '' : String(+trimmed);
+      break;
+    }
+    grade = trimmed;   // remembered only to show it in the retry message
+  }
   const fd = new FormData();
   files.forEach(f => fd.append('files', f));
   if (grade.trim()) fd.append('grade_target', grade.trim());
