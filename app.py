@@ -11,6 +11,7 @@ first time on a fresh database.db redirects to the Setup Wizard
 (/setup), where the school creates its own admin username and password.
 """
 import os
+import posixpath
 import io
 import json
 import csv
@@ -586,9 +587,11 @@ def _handle_unexpected_error(e):
             # as a real, readable message instead.
             return jsonify({"error": e.description or str(e)}), e.code
         return e
+    # The exception text can contain SQL, bound parameters or hostnames, so it
+    # goes to the log only, never into the response.
     app.logger.exception("Unhandled error on %s", request.path)
     if request.path.startswith("/api/"):
-        return jsonify({"error": f"Unexpected server error: {e}"}), 500
+        return jsonify({"error": "Something went wrong. Please try again."}), 500
     raise e
 
 db.init_app(app)
@@ -1185,7 +1188,15 @@ def serve_upload(subpath):
     were being generated correctly on disk.
     Requires login, same as everything else in the app, and only ever
     serves keys under uploads/ (storage rejects path traversal).
+
+    Backups also live under uploads/ but hold every table, children's records
+    included, so they are never served from here: admins get them through
+    /api/backup/download. The check is on the normalised, lower-cased path
+    because Windows file systems ignore case and treat "\\" as a separator.
     """
+    folder = posixpath.normpath(subpath.replace("\\", "/")).lstrip("/").lower()
+    if folder == "backups" or folder.startswith("backups/"):
+        abort(404)
     return _send_stored(f"uploads/{subpath}")
 
 
@@ -2104,8 +2115,13 @@ def online_book_link(book_id):
 
     key, mimetype, _inline, download_name = _online_book_target(book)
     if storage.remote:
-        url = storage.presigned_url(key, LINK_TTL_SECONDS, content_type=mimetype,
-                                    download_name=download_name)
+        try:
+            url = storage.presigned_url(key, LINK_TTL_SECONDS, content_type=mimetype,
+                                        download_name=download_name)
+        except ValueError:
+            # The stored key is unusable (e.g. contains ".."): same answer as
+            # for a missing item, as /view gives.
+            return jsonify({"error": "Item not found."}), 404
         expires_in = LINK_TTL_SECONDS
         warn_at = max(expires_in - 300, expires_in // 2)
     else:
@@ -2131,6 +2147,9 @@ def online_book_link(book_id):
     return response
 
 
+MAX_PROGRESS_SECONDS = 86400
+
+
 @app.route("/api/online-books/<int:book_id>/progress", methods=["POST"])
 def save_online_book_progress(book_id):
     """
@@ -2150,6 +2169,10 @@ def save_online_book_progress(book_id):
     # bool is an int subclass in Python, but true/false is not a position.
     if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds < 0:
         return jsonify({"error": "seconds must be a whole number, 0 or more."}), 400
+    # A day is far beyond any real item; the cap also keeps the value inside
+    # the 32-bit INTEGER column, which Postgres enforces (SQLite does not).
+    if seconds > MAX_PROGRESS_SECONDS:
+        return jsonify({"error": f"seconds must be {MAX_PROGRESS_SECONDS} or less."}), 400
     if db.session.get(OnlineBook, book_id) is None:
         return jsonify({"error": "Item not found."}), 404
 
@@ -2210,7 +2233,7 @@ def add_online_book():
         return jsonify({"error": str(ve)}), 400
     except Exception as e:
         app.logger.exception("Digital Library upload failed while saving the file")
-        return jsonify({"error": f"Could not save the file — {type(e).__name__}: {e}"}), 500
+        return jsonify({"error": "Could not save the file. Please try again."}), 500
 
     try:
         if author:
@@ -2223,7 +2246,7 @@ def add_online_book():
     except Exception as e:
         db.session.rollback()
         app.logger.exception("Digital Library upload failed while saving to the database")
-        return jsonify({"error": f"File was saved but couldn't be recorded — {type(e).__name__}: {e}"}), 500
+        return jsonify({"error": "The file was saved but could not be recorded. Please try again."}), 500
     return jsonify(book.to_dict()), 201
 
 
@@ -2257,7 +2280,7 @@ def edit_online_book(book_id):
             return jsonify({"error": str(ve)}), 400
         except Exception as e:
             app.logger.exception("Digital Library edit failed while saving the replacement file")
-            return jsonify({"error": f"Could not save the file — {type(e).__name__}: {e}"}), 500
+            return jsonify({"error": "Could not save the file. Please try again."}), 500
 
         old_keys = [book.pdf_path, book.preview_pdf_path]
         book.pdf_path = replacement.pdf_path
@@ -3227,7 +3250,7 @@ def import_books():
     except Exception as e:
         db.session.rollback()
         app.logger.exception("Book import failed")
-        return jsonify({"error": f"Import failed: {e}"}), 500
+        return jsonify({"error": "Import failed. Please check the file and try again."}), 500
 
 
 @app.route("/api/import/members", methods=["POST"])
@@ -3342,7 +3365,7 @@ def import_members():
     except Exception as e:
         db.session.rollback()
         app.logger.exception("Member import failed")
-        return jsonify({"error": f"Import failed: {e}"}), 500
+        return jsonify({"error": "Import failed. Please check the file and try again."}), 500
 
 
 # Recognised column-name variants per Book field, used to auto-detect the
