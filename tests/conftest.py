@@ -126,3 +126,29 @@ def login_as(client, user):
         sess["_user_id"] = str(user.id)
         sess["_fresh"] = True
         sess["srv"] = app.SERVER_INSTANCE_ID
+
+
+@pytest.fixture
+def r2(app_module, monkeypatch):
+    """An R2Storage backed by moto's in-memory S3, installed as app.storage.
+
+    raising=False because app.storage only exists once app.py wires it up;
+    this keeps the fixture usable either way.
+    """
+    import boto3
+    from botocore.config import Config
+    from moto import mock_aws
+    from storage import R2Storage
+
+    # Dummy credentials so botocore never reaches for real ones.
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    with mock_aws():
+        # SigV4 like production (get_storage); the default would presign with
+        # the legacy scheme, which has no X-Amz-Expires parameter.
+        client = boto3.client("s3", region_name="us-east-1",
+                              config=Config(signature_version="s3v4"))
+        client.create_bucket(Bucket="test-bucket")
+        storage = R2Storage(client, "test-bucket")
+        monkeypatch.setattr(app_module, "storage", storage, raising=False)
+        yield storage
