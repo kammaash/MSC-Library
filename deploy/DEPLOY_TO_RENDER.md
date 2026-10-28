@@ -284,6 +284,118 @@ staging service. Tick each item in order.
 13. Delete the staging service, Neon branch, bucket and the extra Redirect
     URI when finished.
 
+## Checks that need the real accounts
+
+The numbered staging check above covers the app's own behaviour. The items
+below depend on how Render, Cloudflare, Neon and Microsoft really behave, which
+cannot be tested without the real accounts. Do them on the staging service and
+tick each one. If an item fails, do not go live; note what you saw and report
+it. Browser tools mean pressing F12 and opening the **Network** tab (keep it
+open before you click, and tick "Preserve log").
+
+### Cloudflare R2
+
+- [ ] **Signed requests are accepted.** As a student, open the staging PDF.
+      In the Network tab the first request to `/api/online-books/.../view`
+      (or `/link`) answers 302, and the next request goes to
+      `...r2.cloudflarestorage.com/...?X-Amz-Signature=...` and answers 200.
+      A 403 `SignatureDoesNotMatch` means the R2 key, account ID or bucket
+      name is wrong.
+- [ ] **A 400 MB video uploads in parts.** Upload an MP4 of about 400 MB
+      (step 5 of the staging check). It must finish without an error, and the
+      object in the R2 bucket must show the same size as the file on your PC.
+      If the upload stops part-way, copy the error from the Render logs.
+- [ ] **Seeking works (HTTP Range).** Open that video and drag to the
+      middle. In the Network tab the video request to the presigned address
+      shows status **206** and a `Content-Range` header, and playback resumes
+      from the new point without downloading from the start.
+- [ ] **Inline PDF versus download name.** Open the PDF as a student: it must
+      display in the browser, not download. Then, as admin or librarian,
+      download the original of a Word or PowerPoint item: the browser must
+      save a file named after the item's title (for example `Class 8
+      Notes.docx`). In the Network tab the R2 response shows
+      `Content-Type` and `Content-Disposition` matching this (`inline` for the
+      PDF, `attachment; filename=...` for the download), even though the file
+      was stored under a different name.
+
+### Render
+
+- [ ] **The app sees the real student address (one proxy hop).** On a phone
+      using mobile data, enter a wrong PIN for one student card 5 times. That
+      card must now answer "Too many failed sign-in attempts. Please try
+      again in about 15 minute(s)." Then, on a PC on the school network, sign
+      in to the **same** card with the correct PIN. It must work. If it is
+      also locked, every user is reaching the app with the same address (the
+      wrong `LIBRARY_TRUST_PROXY` setting, or an extra proxy such as
+      Cloudflare in front). The phone's lock lifts by itself after 15 minutes.
+- [ ] **The app sees https.** Open `http://<staging address>/`. It must go to
+      `https://` once, with no redirect loop. In the browser tools
+      (Application, Cookies) the `session` cookie shows **Secure**.
+- [ ] **A 400 MB upload passes through Render on the Starter plan.** Upload
+      the ~400 MB MP4 through the staging address, not through R2 directly.
+      It must finish without a 413, 502 or 504 error or a timeout. Watch the
+      Render logs while it runs; a worker restart or "out of memory" message
+      there is a failure.
+
+### Microsoft Entra
+
+- [ ] **What `preferred_username` contains.** In Entra, open Users, then a
+      real student: note the **User principal name**. Do the same for a B2B
+      guest account (a guest's name often looks like
+      `name_otherdomain.com#EXT#@school.onmicrosoft.com`, not their email).
+      The School Email on the library card must equal the sign-in name
+      shown for that account (see "How students are matched" in step 3).
+      Sign in with Microsoft with a student account; it must land on that
+      student's page. If it says "Your Microsoft account isn't linked to a
+      library card yet", compare the two values character by character.
+- [ ] **Another tenant is refused.** Sign in with a Microsoft account from a
+      different organisation (a personal outlook.com account also works). It
+      must be refused ("Please sign in with your school Microsoft account.")
+      and must not reach any library page.
+- [ ] **No consent prompt for students.** Sign in as a student who has never
+      used the app. Microsoft must go straight back to the library without an
+      "Approve" or "Need admin approval" screen. If one appears, grant admin
+      consent as in step 3, point 6.
+
+### Neon
+
+- [ ] **Pooler latency is acceptable.** On staging, open the book list,
+      the member list and the student home page. Each should load in about
+      a second or two. Render's Singapore region and Neon's
+      `aws-ap-southeast-1` should be close; a page that takes many seconds
+      every time needs looking at (check the connection string is the pooled
+      one).
+- [ ] **Scale-to-zero wake-up.** Leave staging unused for the idle period
+      Neon shows under the project's compute settings (a few minutes on the
+      Free plan). Then load a page. The first load may be slow; write down
+      how many seconds it took. It must succeed and not show an error page.
+      If the wait is too long for the first student of the morning, turn
+      scale-to-zero off or open the site a few minutes before the first
+      class.
+- [ ] **Idle-in-transaction timeout does not kill normal requests.** Use the
+      site normally for 10 minutes: issue a book, return it, open a PDF, and
+      leave a page open between actions. Then search the Render logs for
+      `idle-in-transaction` or `terminating connection`. There must be none.
+- [ ] **`TZ` gives Indian dates.** Issue a book. Its issue date must be
+      today's date in India and its due date the correct number of days after
+      that. Check this late in the evening (after 6:30 pm India time, when
+      UTC is still the previous day), because that is when a missing `TZ`
+      shows. A fine for an overdue book must start counting from the Indian
+      due date.
+
+### Cloudflare DNS
+
+- [ ] **`library.msceducation.net` is "DNS only".** In the Cloudflare DNS
+      records for msceducation.net, the `library` record must show a **grey
+      cloud** ("DNS only"), not an orange one ("Proxied"). A proxied record
+      adds a second proxy in front of Render, so the app sees Cloudflare's
+      address and every user appears to share one IP, which defeats the
+      sign-in lockouts and can block Render's certificate. Check this again
+      after step 7 when the record is changed. The staging address
+      (`*.onrender.com`) is not on Cloudflare, so the real record can only be
+      confirmed in step 7; repeat the lockout test under "Render" above on
+      `https://library.msceducation.net` once the domain is live.
+
 ## 7. Domain
 
 1. In Render, add the custom domain `library.msceducation.net` to the service.

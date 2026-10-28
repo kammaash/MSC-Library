@@ -21,6 +21,45 @@
 
 ---
 
+## Behaviour changes in the cloud-deployment branch
+
+These differ from the `main` branch and can surprise staff or students.
+
+- **Deleting a member or a digital item now also deletes the students'
+  records for it.** Deleting a digital item (`delete_online_book`, admin
+  only) removes every student's bookmarks, favourites and read history for
+  that item. Deleting a member (`delete_member`) removes that member's
+  bookmarks, favourites, read history, digital-library visits and PIN-reset
+  requests, plus their student sign-in account (loans, fines, lost-book and
+  certificate records are kept). Postgres refuses to delete a row that is
+  still referenced, so this is needed on the cloud; it now applies to
+  offline installs too. Achievement points count read history (5 points per
+  item read) and library visits, so after a digital item is deleted every
+  student who had read it loses those points and their reading count falls.
+- **Backup list order.** `/api/backup/list` (View Backups) now sorts
+  newest first by the date and time in the file name. Before, it sorted by
+  name alone, which put every `auto_backup_` file ahead of every `backup_`
+  file whatever its date. Files in the backups folder that do not match the
+  `backup_` / `auto_backup_` naming are listed last.
+- **Name of the downloaded "Office" original.** Staff downloading the
+  original Word or PowerPoint file of a digital item get `<title>.<type>`
+  with control characters (such as line breaks), double quotes and
+  backslashes removed from the title (`_download_name`). Before, the title
+  was used as typed, so a title containing a quote or backslash gave a
+  different file name on an offline PC. Other characters, including
+  non-English text, are kept. An empty title becomes `download`.
+- **Registers, reports and exports are staff-only.** The member, issue and
+  fine lists (`/api/members`, `/api/issues`, `/api/fines`), all
+  `/api/reports/...` endpoints and `/api/export/<entity>` now allow only
+  admin, librarian and viewer. The lost-books, periodicals, visitors and
+  donations registers apply the same rule to reading; adding to them still
+  needs admin or librarian. A student who calls any of these gets a 403
+  "Forbidden". Before, any signed-in user, students included, could read
+  them. Student pages use their own `/api/student/...` endpoints and are
+  not affected.
+
+---
+
 ## Internet-Facing Deployment Support (August 2026)
 
 Added to support running SmartLib360 on a public subdomain (e.g.
