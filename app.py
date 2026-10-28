@@ -51,7 +51,16 @@ def _get_base_dir():
     point at PyInstaller's temporary extraction folder, which gets wiped
     out between runs — using that for the database would silently lose
     all data on every restart, so this deliberately branches for that case.
+
+    LIBRARY_DATA_DIR, when set, overrides both. It exists so the automated
+    tests can run against a throwaway directory instead of opening the real
+    database.db next to app.py. It is checked first so it also wins inside
+    a frozen build.
     """
+    override = os.environ.get("LIBRARY_DATA_DIR")
+    if override:
+        os.makedirs(override, exist_ok=True)
+        return os.path.abspath(override)
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
