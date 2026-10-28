@@ -24,6 +24,24 @@ def test_normalize_key_rejects_empty():
             normalize_key(bad)
 
 
+def test_normalize_key_rejects_non_strings():
+    for bad in (None, 5, b"uploads/a.pdf", ["uploads", "a.pdf"]):
+        with pytest.raises(ValueError):
+            normalize_key(bad)
+
+
+def test_normalize_key_rejects_empty_and_dot_segments():
+    for bad in ("a//b", "a/./b", "./a", "a/.", "uploads/", "uploads\\\\x.pdf/", "a/../b"):
+        with pytest.raises(ValueError):
+            normalize_key(bad)
+
+
+def test_list_keys_still_accepts_trailing_slash_prefix(tmp_path):
+    s = LocalStorage(str(tmp_path)); s.save_bytes(b"x", "uploads/a/x.png")
+    assert s.list_keys("uploads/a/") == ["uploads/a/x.png"]
+    assert s.list_keys("") == ["uploads/a/x.png"]
+
+
 def test_local_roundtrip(tmp_path):
     s = LocalStorage(str(tmp_path)); s.save_bytes(b"hi", "uploads/qrcodes/x.png")
     assert open(s.local_path("uploads\\qrcodes\\x.png"), "rb").read() == b"hi"
@@ -72,6 +90,17 @@ def test_r2_presign_attachment_filename(r2):
     url = r2.presigned_url("uploads/backups/b.db", expires_in=300, download_name="b.db")
     assert "response-content-disposition=attachment" in url
     assert "b.db" in url
+
+
+def test_r2_presign_non_ascii_filename(r2):
+    from urllib.parse import parse_qs, quote, urlparse
+    url = r2.presigned_url("uploads/pdfs/a.pdf", expires_in=300, download_name='తెలుగు "x".pdf')
+    disposition = parse_qs(urlparse(url).query)["response-content-disposition"][0]
+    assert disposition == (
+        'attachment; filename="______ x.pdf"; '
+        f"filename*=UTF-8''{quote('తెలుగు \"x\".pdf', safe='')}"
+    )
+    disposition.encode("ascii")  # header-safe
 
 
 def test_r2_save_file_and_delete(r2, tmp_path):
@@ -124,3 +153,6 @@ def test_get_storage_builds_r2_client(tmp_path):
     s = get_storage(str(tmp_path), env=env)
     assert isinstance(s, R2Storage) and s.remote is True and s.bucket == "bkt"
     assert s.client.meta.endpoint_url == "https://acct.r2.cloudflarestorage.com"
+    cfg = s.client.meta.config
+    assert cfg.request_checksum_calculation == "when_required"
+    assert cfg.response_checksum_validation == "when_required"

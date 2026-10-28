@@ -13,6 +13,7 @@ normalize_key() converts those, and every method below runs its key through it.
 import os
 import shutil
 from typing import Mapping
+from urllib.parse import quote
 
 R2_ENV_VARS = ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_NAME")
 
@@ -20,11 +21,15 @@ R2_ENV_VARS = ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_
 def normalize_key(key: str) -> str:
     """Return the canonical form of a storage key.
 
-    Backslashes become '/', leading '/' is dropped, and any '..' segment (or an
-    empty result) is rejected so a key can never point outside the storage root.
+    Backslashes become '/', leading '/' is dropped. Non-string input, an empty
+    result, a trailing '/', and any empty, '.' or '..' segment (so "a//b",
+    "a/./b", "a/../b") are rejected: a key must name one file and can never
+    point outside the storage root.
     """
-    cleaned = str(key).replace("\\", "/").lstrip("/")
-    if not cleaned or any(part == ".." for part in cleaned.split("/")):
+    if not isinstance(key, str):
+        raise ValueError(f"invalid storage key: {key!r}")
+    cleaned = key.replace("\\", "/").lstrip("/")
+    if not cleaned or any(part in ("", ".", "..") for part in cleaned.split("/")):
         raise ValueError(f"invalid storage key: {key!r}")
     return cleaned
 
@@ -148,8 +153,15 @@ class R2Storage:
         if download_name is None:
             disposition = "inline"
         else:
-            safe = download_name.replace('"', "").replace("\r", "").replace("\n", "")
-            disposition = f'attachment; filename="{safe}"'
+            # Book titles can be Telugu/non-ASCII, and HTTP header values are
+            # ASCII. RFC 6266: an ASCII fallback in filename= for old clients,
+            # plus the real name percent-encoded in filename*= (RFC 5987).
+            fallback = "".join(
+                "_" if ord(c) > 126 or ord(c) < 32 else c
+                for c in download_name if c not in '"\\\r\n'
+            )
+            disposition = (f'attachment; filename="{fallback}"; '
+                           f"filename*=UTF-8''{quote(download_name, safe='')}")
         params = {"Bucket": self.bucket, "Key": key, "ResponseContentDisposition": disposition}
         if content_type:
             params["ResponseContentType"] = content_type
@@ -184,6 +196,13 @@ def get_storage(base_dir: str, env: Mapping[str, str] = os.environ) -> "LocalSto
         aws_access_key_id=values["R2_ACCESS_KEY_ID"],
         aws_secret_access_key=values["R2_SECRET_ACCESS_KEY"],
         region_name="auto",
-        config=Config(signature_version="s3v4"),
+        config=Config(
+            signature_version="s3v4",
+            # Recent boto3 adds CRC32 checksum headers to every request by
+            # default, which Cloudflare R2 has rejected. Only send/verify
+            # checksums when an operation requires them.
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        ),
     )
     return R2Storage(client, values["R2_BUCKET_NAME"])
