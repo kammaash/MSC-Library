@@ -22,7 +22,8 @@ On first run with a fresh database the app redirects to the Setup Wizard
 
 - **Render + Neon + Cloudflare R2 (internet, `library.msceducation.net`):**
   follow [deploy/DEPLOY_TO_RENDER.md](deploy/DEPLOY_TO_RENDER.md). The app
-  runs on Render (`Procfile` starts gunicorn with one worker), the database
+  runs on Render (the Start Command, the same text as `Procfile`, starts
+  gunicorn with one worker), the database
   is Neon Postgres (`DATABASE_URL`), uploaded files and backups live in an R2
   bucket (`R2_*`), and students can sign in with their school Microsoft
   account (`ENTRA_*`). The guide has the full step-by-step instructions, the

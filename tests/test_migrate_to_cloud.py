@@ -5,6 +5,9 @@ SQLite -> SQLite stands in for SQLite -> Postgres: both sides are built from
 the Flask-SQLAlchemy model metadata on a plain engine (no Flask app needed),
 which is also all the script itself does — it never imports app.py.
 """
+import shutil
+import tempfile
+
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
@@ -64,11 +67,22 @@ def test_copies_rows_and_fixes_windows_paths(seeded_source_db, empty_target_db):
 
 
 @pytest.mark.parametrize("raw, expected", [(1, True), (0, False), ("1", True), ("0", False),
-                                           (True, True), (False, False), (None, None)])
+                                           (True, True), (False, False), (None, None),
+                                           ("True", True), ("False", False), ("false", False),
+                                           (" FALSE ", False), ("t", True), ("F", False),
+                                           ("yes", True), ("No", False), ("y", True), ("n", False),
+                                           ("", False), ("2", True), ("1.0", True), ("0.0", False)])
 def test_boolean_conversion(raw, expected):
-    # SQLite keeps 0/1; a real Postgres BOOLEAN column rejects integers, so
-    # the value handed to the target must already be a bool (None stays None).
+    # SQLite keeps 0/1 (sometimes as text, sometimes as the words "True" /
+    # "False"); a real Postgres BOOLEAN column rejects integers, so the value
+    # handed to the target must already be a bool (None stays None). The
+    # string "False" in particular must not become True.
     assert migrate_to_cloud._to_bool(raw) is expected
+
+
+def test_boolean_conversion_rejects_unreadable_text():
+    with pytest.raises(ValueError, match="maybe"):
+        migrate_to_cloud._to_bool("maybe")
 
 
 def test_refuses_non_empty_target(seeded_source_db):
@@ -137,8 +151,9 @@ def test_postgres_sequence_reset_sql_quotes_the_table():
     # The dialect alone is enough; no driver or connection needed.
     dialect = postgresql.dialect()
     sql = migrate_to_cloud._sequence_reset_sql(dialect, "online_books")
+    # Next id is MAX+1 (1 for an empty table), not MAX or 2.
     assert sql == ("SELECT setval(pg_get_serial_sequence('online_books', 'id'), "
-                   "COALESCE(MAX(id), 1)) FROM online_books")
+                   "COALESCE(MAX(id), 0) + 1, false) FROM online_books")
     # Reserved words get quoted, inside the string literal and outside it.
     sql = migrate_to_cloud._sequence_reset_sql(dialect, "user")
     assert "pg_get_serial_sequence('\"user\"', 'id')" in sql and sql.endswith('FROM "user"')
@@ -184,7 +199,7 @@ def test_main_requires_r2(tmp_path, capsys):
 
 
 def test_main_upload_failure_leaves_database_empty_and_rerun_works(
-        seeded_source_db, empty_target_db, tmp_path, r2, monkeypatch):
+        seeded_source_db, empty_target_db, tmp_path, r2, monkeypatch, capsys):
     uploads = tmp_path / "uploads"
     (uploads / "pdfs").mkdir(parents=True)
     (uploads / "pdfs" / "old.pdf").write_bytes(b"%PDF")
@@ -198,8 +213,8 @@ def test_main_upload_failure_leaves_database_empty_and_rerun_works(
         raise OSError("network down")
 
     monkeypatch.setattr(migrate_to_cloud, "copy_uploads", failing)
-    with pytest.raises(OSError):
-        migrate_to_cloud.main(argv, env=env)
+    assert migrate_to_cloud.main(argv, env=env) == 1
+    assert "Migration failed: network down" in capsys.readouterr().err
     assert _query(empty_target_db, "select count(*) from online_books") == [(0,)]
 
     monkeypatch.setattr(migrate_to_cloud, "copy_uploads", real_copy_uploads)
@@ -213,13 +228,14 @@ def test_main_refuses_non_empty_target_before_uploading(seeded_source_db, tmp_pa
     uploads.mkdir()
     (uploads / "a.pdf").write_bytes(b"%PDF")
     monkeypatch.setattr(migrate_to_cloud, "get_storage", lambda base_dir, env: r2)
-    with pytest.raises(RuntimeError, match="not empty"):
-        migrate_to_cloud.main(["--sqlite", seeded_source_db.removeprefix("sqlite:///"),
-                               "--uploads", str(uploads)], env={"DATABASE_URL": seeded_source_db})
+    code = migrate_to_cloud.main(["--sqlite", seeded_source_db.removeprefix("sqlite:///"),
+                                  "--uploads", str(uploads)], env={"DATABASE_URL": seeded_source_db})
+    assert code == 1
+    assert "Migration failed: Target database is not empty" in capsys.readouterr().err
     assert r2.list_keys("uploads/") == []
 
 
-def test_target_without_tables_is_refused_before_uploading(tmp_path, r2, seeded_source_db, monkeypatch):
+def test_target_without_tables_is_refused_before_uploading(tmp_path, r2, seeded_source_db, monkeypatch, capsys):
     # A brand-new Neon database has no tables until the app has started once
     # against it. Copying "into" it would silently do nothing and still report
     # success, so it must fail up front, before any file is uploaded.
@@ -229,10 +245,150 @@ def test_target_without_tables_is_refused_before_uploading(tmp_path, r2, seeded_
     uploads.mkdir()
     (uploads / "a.pdf").write_bytes(b"%PDF")
     monkeypatch.setattr(migrate_to_cloud, "get_storage", lambda base_dir, env: r2)
-    with pytest.raises(RuntimeError, match="Start the app once") as exc:
-        migrate_to_cloud.main(["--sqlite", seeded_source_db.removeprefix("sqlite:///"),
-                               "--uploads", str(uploads)], env={"DATABASE_URL": bare_target})
-    assert "DATABASE_URL" in str(exc.value)
+    code = migrate_to_cloud.main(["--sqlite", seeded_source_db.removeprefix("sqlite:///"),
+                                  "--uploads", str(uploads)], env={"DATABASE_URL": bare_target})
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "Start the app once" in err and "DATABASE_URL" in err
     assert r2.list_keys("uploads/") == []
     with pytest.raises(RuntimeError, match="Start the app once"):
         migrate_to_cloud.ensure_target_empty(bare_target)
+
+
+# --- rows left dangling on the PC (SQLite never enforced foreign keys) -------
+
+@pytest.fixture
+def orphan_source_db(tmp_path):
+    """A PC database where a member and a digital item were deleted but rows
+    pointing at them remain: users.member_id -> members.id (nullable) and
+    bookmarks/favorites/read_history.online_book_id -> online_books.id."""
+    url = _make_db(tmp_path, "orphans.db")
+    engine = sa.create_engine(url)
+    # What the PC's app did: foreign keys not enforced (some SQLite builds
+    # default them to ON, so say OFF explicitly).
+    sa.event.listen(engine, "connect", lambda conn, _rec: conn.execute("PRAGMA foreign_keys=OFF"))
+    t = db.metadata.tables
+    with engine.begin() as conn:
+        conn.execute(t["members"].insert().values(id=1, member_id="MEM-1", name="Asha"))
+        conn.execute(t["online_books"].insert().values(id=7, title="Kept Book", pdf_path="uploads/pdfs/k.pdf", file_type="pdf"))
+        conn.execute(t["users"].insert(), [
+            {"id": 1, "username": "asha", "name": "Asha", "role": "student", "member_id": 1},
+            {"id": 2, "username": "gone", "name": "Gone", "role": "student", "member_id": 99},  # member deleted
+            {"id": 3, "username": "staff", "name": "Staff", "role": "librarian", "member_id": None},
+        ])
+        conn.execute(t["bookmarks"].insert(), [
+            {"id": 1, "member_id": "MEM-1", "online_book_id": 7},
+            {"id": 2, "member_id": "MEM-1", "online_book_id": 8},  # item deleted
+            {"id": 3, "member_id": "MEM-1", "online_book_id": 8},
+        ])
+        conn.execute(t["favorites"].insert().values(id=1, member_id="MEM-1", online_book_id=8))
+        conn.execute(t["read_history"].insert().values(id=1, member_id="MEM-1", online_book_id=7, open_count=1))
+    engine.dispose()
+    return url
+
+
+@pytest.fixture
+def sqlite_foreign_keys_on():
+    # SQLite ignores foreign keys unless every connection asks for them; make
+    # the target behave like Postgres.
+    def enable(dbapi_connection, _record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+    sa.event.listen(sa.engine.Engine, "connect", enable)
+    yield
+    sa.event.remove(sa.engine.Engine, "connect", enable)
+
+
+def _check_orphans_repaired(target_url, counts, out):
+    assert counts["users"] == 3
+    assert counts["bookmarks"] == 1
+    assert counts["favorites"] == 0
+    assert counts["read_history"] == 1
+    assert _query(target_url, "select id, member_id from users order by id") == [(1, 1), (2, None), (3, None)]
+    assert _query(target_url, "select id, online_book_id from bookmarks") == [(1, 7)]
+    assert "  bookmarks: 2 rows skipped (they pointed at a deleted digital item)" in out
+    assert "  favorites: 1 row skipped (they pointed at a deleted digital item)" in out
+    assert "  users: member_id cleared on 1 row (they pointed at a deleted member" in out
+    assert "read_history" not in out.split("Some rows pointed")[1]
+
+
+def test_rows_pointing_at_deleted_parents_are_repaired_not_fatal(
+        orphan_source_db, empty_target_db, sqlite_foreign_keys_on, capsys):
+    # Sanity check that the target really enforces foreign keys here.
+    engine = sa.create_engine(empty_target_db)
+    with pytest.raises(sa.exc.IntegrityError), engine.begin() as conn:
+        conn.execute(db.metadata.tables["bookmarks"].insert().values(id=1, member_id="M", online_book_id=8))
+    engine.dispose()
+
+    counts = copy_database(orphan_source_db, empty_target_db)
+    _check_orphans_repaired(empty_target_db, counts, capsys.readouterr().out)
+
+
+def test_main_reports_repairs_and_succeeds(orphan_source_db, empty_target_db, sqlite_foreign_keys_on,
+                                           tmp_path, r2, monkeypatch, capsys):
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    monkeypatch.setattr(migrate_to_cloud, "get_storage", lambda base_dir, env: r2)
+    code = migrate_to_cloud.main(["--sqlite", orphan_source_db.removeprefix("sqlite:///"),
+                                  "--uploads", str(uploads)], env={"DATABASE_URL": empty_target_db})
+    assert code == 0
+    assert "bookmarks: 2 rows skipped" in capsys.readouterr().out
+
+
+def test_main_failure_is_one_readable_line(seeded_source_db, empty_target_db, tmp_path, r2, monkeypatch, capsys):
+    # A genuine database error (here a CHECK constraint) must come out as one
+    # line naming the table, with no SQL statement or row values in it.
+    t_engine = sa.create_engine(empty_target_db)
+    with t_engine.begin() as conn:
+        conn.execute(sa.text("DROP TABLE online_books"))
+        conn.execute(sa.text("DROP TABLE read_history"))
+        conn.execute(sa.text("CREATE TABLE online_books (id INTEGER PRIMARY KEY, title VARCHAR(200) "
+                             "CHECK (title <> 'Old Book'))"))
+    t_engine.dispose()
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    monkeypatch.setattr(migrate_to_cloud, "get_storage", lambda base_dir, env: r2)
+    argv = ["--sqlite", seeded_source_db.removeprefix("sqlite:///"), "--uploads", str(uploads)]
+    assert migrate_to_cloud.main(argv, env={"DATABASE_URL": empty_target_db}) == 1
+    err = capsys.readouterr().err
+    assert err.strip().splitlines() == ["Migration failed: online_books: CHECK constraint failed: title <> 'Old Book'"]
+    assert "Traceback" not in err and "INSERT" not in err
+
+    assert migrate_to_cloud.main(argv + ["--verbose"], env={"DATABASE_URL": empty_target_db}) == 1
+    err = capsys.readouterr().err
+    assert "Migration failed: online_books:" in err and "Traceback" in err
+
+
+@pytest.fixture(scope="module")
+def postgres_url():
+    pgserver = pytest.importorskip("pgserver")
+    data_dir = tempfile.mkdtemp(prefix="smartlib-pg-")
+    server = pgserver.get_server(data_dir, cleanup_mode="stop")
+    try:
+        yield migrate_to_cloud._sqlalchemy_database_uri(server.get_uri())
+    finally:
+        server.cleanup()
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
+def test_orphans_repaired_on_real_postgres(orphan_source_db, postgres_url, capsys):
+    engine = sa.create_engine(postgres_url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa.text("DROP SCHEMA public CASCADE"))
+            conn.execute(sa.text("CREATE SCHEMA public"))
+        db.metadata.create_all(engine)
+
+        counts = copy_database(orphan_source_db, postgres_url)
+        _check_orphans_repaired(postgres_url, counts, capsys.readouterr().out)
+
+        # Sequences continue after the highest copied id; an empty table starts at 1.
+        with engine.begin() as conn:
+            t = db.metadata.tables
+            new_user = conn.execute(t["users"].insert().values(username="new", name="N", role="viewer")
+                                    .returning(t["users"].c.id)).scalar()
+            new_cert = conn.execute(t["certificates"].insert().values(member_id="M", title="T")
+                                    .returning(t["certificates"].c.id)).scalar()
+        assert new_user == 4
+        assert new_cert == 1
+    finally:
+        engine.dispose()

@@ -76,7 +76,7 @@ def test_add_online_book_database_error_is_a_fixed_message(client, app_module, m
     r = client.post("/api/online-books", data={"title": "T", "file": (io.BytesIO(b"x"), "a.pdf")},
                     content_type="multipart/form-data")
     assert r.status_code == 500 and "hunter2" not in r.get_data(as_text=True)
-    assert r.get_json()["error"] == "The file was saved but could not be recorded. Please try again."
+    assert r.get_json()["error"] == "Could not save the file. Please try again."
 
 
 def test_edit_online_book_save_error_is_a_fixed_message(client, app_module, sample_book, monkeypatch):

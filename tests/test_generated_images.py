@@ -28,11 +28,15 @@ def test_book_barcode_local_is_png_on_disk(client, app_module):
         assert fh.read(4) == b"\x89PNG"
 
 
-def test_barcode_filename_is_sanitised(client, r2):
+def test_barcode_filename_is_sanitised(client, r2, app_module):
     login_as(client, make_admin())
     b = client.post("/api/books", json={"title": "Odd", "accession_no": "AB/12"}).get_json()
-    assert b["barcode_path"] == "uploads/barcodes/AB_12.png"
-    assert r2.list_keys("uploads/barcodes/") == ["uploads/barcodes/AB_12.png"]
+    # The sanitised name gets a short hash of the real number so that look-alike
+    # numbers ("AB/12" vs "AB_12") do not share one file.
+    key = app_module._barcode_key("AB/12")
+    assert key.startswith("uploads/barcodes/AB_12_") and "/" not in key[len("uploads/barcodes/"):]
+    assert b["barcode_path"] == key
+    assert r2.list_keys("uploads/barcodes/") == [key]
 
 
 def test_barcode_skipped_when_accession_has_no_usable_name(client, r2):

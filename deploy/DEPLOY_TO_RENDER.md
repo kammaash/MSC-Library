@@ -32,6 +32,7 @@ repository is public.
 | `LIBRARY_FORCE_HTTPS_COOKIES` | `1`. Secure cookies, redirect to HTTPS, HSTS | Yes |
 | `LIBRARY_TRUST_PROXY` | `1`. Makes login lockouts use the student's real IP address instead of Render's proxy. Do not set this on a school-PC install | Yes |
 | `PUBLIC_BASE_URL` | `https://library.msceducation.net` (no trailing slash). Used in QR codes and as the Microsoft redirect address | Yes |
+| `TZ` | `Asia/Kolkata`. Makes due dates, fines and report times use Indian time; Render's clock is UTC otherwise | Yes |
 | `R2_ACCOUNT_ID` | Cloudflare account ID (R2 overview page) | Yes |
 | `R2_ACCESS_KEY_ID` | From the R2 API token (step 2) | Yes |
 | `R2_SECRET_ACCESS_KEY` | From the R2 API token (step 2); shown only once | Yes |
@@ -52,8 +53,9 @@ start.
 1. Sign in to Neon and create a project. Choose the region
    `aws-ap-southeast-1` (Singapore).
 2. Open the project's connection details and copy the **pooled** connection
-   string (the one with connection pooling turned on).
-3. Keep it for step 4 as `DATABASE_URL`.
+   string (the one with connection pooling turned on). Also copy the **direct**
+   (non-pooled) string; you need it on your own PC in steps 4 and 5.
+3. Keep the pooled one for step 4 as the Render service's `DATABASE_URL`.
 
 ## 2. Cloudflare R2 (files)
 
@@ -68,8 +70,8 @@ start.
    - Allowed headers: `Range`
    - Exposed headers: `Content-Length`, `Content-Range`, `Accept-Ranges`
 
-   The book reader and video seeking need this. Without it, videos play but
-   cannot be skipped forward and EPUBs may not open.
+   The in-page EPUB reader downloads the book from R2 and needs this rule.
+   Videos and PDFs do not need it.
 
 ## 3. Microsoft Entra (school IT)
 
@@ -93,8 +95,9 @@ This is done by whoever administers the school's Microsoft 365 tenant.
    secret expires, Microsoft sign-in stops working until a new secret is
    created here and pasted into Render as `ENTRA_CLIENT_SECRET`. Staff and PIN
    logins are not affected.
-6. The default `User.Read` permission is enough. No other permissions or
-   admin consent are needed.
+6. The default `User.Read` permission is enough. In API permissions press
+   **Grant admin consent for `<tenant>`** once, so students are never asked to
+   consent themselves (many school tenants block user consent).
 
 ### How students are matched (read before enabling)
 
@@ -102,6 +105,12 @@ A student's first Microsoft sign-in is matched to their library card by the
 **School Email** on the card. The librarian enters it on the member, or
 imports it through the Excel import (column named `email` or `school email`).
 After the first match the card is bound to that Microsoft account.
+
+The app matches on the student's Microsoft **sign-in name** (User Principal
+Name), which is what the librarian must enter as the School Email on the card.
+In most school tenants this is the same as the email address; if yours differs
+(check a user in Entra → Overview → User principal name), enter the sign-in
+name.
 
 This is only safe if the school's IT controls what the email address is:
 
@@ -115,34 +124,62 @@ choose their own account.
 
 ## 4. Render (the app)
 
+Do steps 4 and 5 first for the staging service described in step 6, and only
+after the staging check passes for the production service.
+
+**Prepare the database first, from your own PC, before the Render service
+exists.** The `/setup` page is open to anyone until the first admin exists,
+and a Render service's `*.onrender.com` address is public from the moment it
+deploys. Whoever reaches `/setup` first becomes the admin. So the tables (and,
+for a fresh start, the admin account) are created from your own PC, and only
+then do you create the service. You need Python and the project folder on that
+PC (`pip install -r requirements.txt`); use Neon's **direct** connection
+string from step 1 for `DATABASE_URL`.
+
+- **Migrating the library PC's data (step 5):** on your own PC (not the
+  library PC), with `DATABASE_URL` and the four `R2_*` variables set in the
+  shell, run `python -c "import app"` once from the project folder. This
+  creates the empty tables in Neon and exits. Then run the migration script
+  (step 5). Only after it has finished create the Render service. Keep the
+  copy of the library PC's `database.db` somewhere other than the project
+  folder, or the app will open it as its own database. Do not **complete**
+  `/setup` at any point; the migration needs the database to be empty (opening
+  the page writes nothing; only submitting the form does).
+- **Starting fresh (no data to migrate):** on your own PC, with the same
+  variables set, run `python app.py`, open `http://127.0.0.1:5000/setup`,
+  create the admin account, then stop it (Ctrl+C). Only then create the Render
+  service.
+- If the service already exists, use Render → Settings → Suspend while you do
+  this, then Resume.
+
+Now create the service:
+
 1. In Render, create a **Web Service** from the GitHub repository
    `kammaash/MSC-Library`, branch `main`. Region: **Singapore**.
+   Before this step the `cloud-deployment` branch must have been merged into
+   `main` (check that `storage.py` and `deploy/DEPLOY_TO_RENDER.md` exist on
+   `main`). Render redeploys automatically on every later push to `main`; each
+   deploy restarts the app and signs everyone out, so push outside school
+   hours. To undo a bad deploy: Render → Deploys → the previous deploy →
+   Rollback.
 2. Plan: **Starter** is recommended for school hours. The **Free** plan works
    for trying it out, but it sleeps after a period of no visits; each wake-up
    restarts the app, which signs everyone out (login sessions are tied to the
    running process), and the first page load is slow.
-3. Build command: `pip install -r requirements.txt`. Start command: take it
-   from the repository's `Procfile`
-   (`gunicorn app:app --workers 1 --threads 8 --timeout 120`). Keep
+3. Build command: `pip install -r requirements.txt`. Start command: Render
+   does not read the `Procfile`, so paste the same text into the Start Command
+   box (`gunicorn app:app --workers 1 --threads 8 --timeout 120`). Keep
    `--workers 1`; the app must run as a single process.
 4. Add the environment variables from the table above:
-   `PYTHON_VERSION`, `DATABASE_URL`, `LIBRARY_SECRET_KEY`,
+   `PYTHON_VERSION`, `DATABASE_URL` (the pooled string), `LIBRARY_SECRET_KEY`,
    `LIBRARY_FORCE_HTTPS_COOKIES`, `LIBRARY_TRUST_PROXY`, `PUBLIC_BASE_URL`,
-   the four `R2_*`, and the three `ENTRA_*`.
-5. Deploy. The first start creates the empty database tables in Neon.
+   `TZ`, the four `R2_*`, and the three `ENTRA_*`.
+5. Deploy. The tables are already in Neon from the preparation above, so the
+   first start only checks them.
 
-**Create the admin account right away, unless you are migrating.** The
-`/setup` page is open to anyone until the first admin exists, and the
-`*.onrender.com` address is public from the moment the deploy finishes.
-Whoever reaches `/setup` first becomes the admin. So:
-
-- **Starting fresh (no data to migrate):** as soon as the deploy is live, open
-  `https://<your-service>.onrender.com/setup` and create the admin account
-  before doing anything else.
-- **Migrating the library PC's data (step 5):** do **not** open `/setup`; the
-  migration needs the database to be empty. Do step 5 immediately after the
-  deploy, without leaving the service unattended for long, and sign in with
-  the PC's existing admin account afterwards.
+Test Microsoft sign-in only on staging (step 6) or after the domain is live
+(step 7); it cannot work on the production `*.onrender.com` address because
+the redirect address is fixed to `PUBLIC_BASE_URL`.
 
 ## 5. Move the library PC's existing data (only if it has real data)
 
@@ -150,37 +187,49 @@ Skip this step for a fresh start (then you created the admin in step 4).
 
 Run this on a computer that has the library PC's `database.db` and its
 `uploads/` folder (copy them off the PC first; do not change the originals).
-It must happen after the first deploy in step 4 (so the tables exist) and
-**before** anyone completes `/setup` (the script refuses to copy into a
-database that already holds data).
+It must happen after the `python -c "import app"` run in step 4 (so the
+tables exist) and before the Render service exists (or while it is
+suspended), so nobody can complete `/setup` first (the script refuses to copy
+into a database that already holds data).
 
 1. Install the dependencies (`pip install -r requirements.txt`).
-2. Set the same `DATABASE_URL` and four `R2_*` variables in your shell.
+2. Set the same `DATABASE_URL` and four `R2_*` variables in your shell. Use
+   Neon's **direct** (non-pooled) connection string for this step; the pooled
+   one is for the Render service. On Windows use `set NAME=value` in Command
+   Prompt or `$env:NAME="value"` in PowerShell.
 3. Run:
 
        python migrate_to_cloud.py --sqlite PATH/database.db --uploads PATH/uploads
 
-It uploads the files first, then copies the rows in one transaction. If it
-fails part-way the database is still empty and you can run it again. Old
-`uploads/backups/` files are not copied. Afterwards, sign in with the PC's
-existing admin account instead of using `/setup`.
+The script prints each table's row count; compare them with the PC's counts.
+It copies only columns that exist on both sides. It uploads the files first,
+then copies the rows in one transaction. If it fails part-way the database is
+still empty and you can run it again. Old `uploads/backups/` files are not
+copied. Afterwards, sign in with the PC's existing admin account instead of
+using `/setup`.
 
-**Then fix the QR codes.** The QR codes copied from the PC point at the old
-school-network address. Sign in as admin, open **QR Code Library**, and press
-**Fix QR Codes Not Opening on Phones**. This rebuilds every QR code so it
-points at `library.msceducation.net` (it uses `PUBLIC_BASE_URL`).
+**Then fix the QR codes.** The digital-item QR codes copied from the PC point
+at the old school-network address. Sign in as admin, open **QR Code Library**,
+and press **Fix QR Codes Not Opening on Phones**. This rebuilds every
+**digital-item** QR code so it points at `library.msceducation.net` (it uses
+`PUBLIC_BASE_URL`). Member card QR codes contain no address and are
+unaffected.
 
 ## 6. Before go-live: staging check
 
 Do this on a separate Render service, ideally on a branch deploy, using a
 Neon **branch** (a copy of the project) and a **separate R2 bucket** with the
-same CORS rule, so real data is not touched. For the staging service use its
-own `*.onrender.com` address as `PUBLIC_BASE_URL`, and add that address as a
-second Redirect URI (`.../auth/microsoft/callback`) in the Entra app. Tick
-each item in order.
+same CORS rule but with the staging address (`https://<service>.onrender.com`)
+as the allowed origin, so real data is not touched. For the staging service
+use its own `*.onrender.com` address as `PUBLIC_BASE_URL`, set `TZ` as in
+step 4, and add that address as a second Redirect URI
+(`.../auth/microsoft/callback`) in the Entra app. Do the step 4 preparation
+(the `python -c "import app"` run, or the fresh-start admin) against the
+branch's direct connection string and the staging bucket before creating the
+staging service. Tick each item in order.
 
-1. **New columns exist.** After the first deploy against Neon, open Neon's SQL
-   editor and run:
+1. **New columns exist.** After the staging preparation and first deploy
+   against Neon, open Neon's SQL editor (on the staging branch) and run:
 
        SELECT column_name FROM information_schema.columns
        WHERE table_name='members' AND column_name IN ('email','entra_oid');
@@ -188,17 +237,22 @@ each item in order.
    It must return **2 rows**. The automatic column migration has not been run
    against real Postgres before, so this check matters. If you get fewer, stop
    and report it.
-2. Open `/setup` and create the admin account.
+2. Sign in with the staging admin account (created or migrated in step 4).
 3. Add a book. Its barcode image must display.
 4. Add a member with a School Email. The member's QR code must display.
-5. Upload a PDF and an MP4 as digital books. This confirms real uploads to R2
-   work (the app configures boto3 not to send the extra checksums that R2
-   rejects). If the upload fails or the file does not appear in the bucket,
-   check the Render logs and report the error.
-6. Sign in as a student with the PIN and open both files.
+5. Upload a PDF, an MP4 and an EPUB as digital books. Make the MP4 close to
+   the 400 MB limit, uploaded from a normal school connection, so the real
+   upload path is tested. This confirms real uploads to R2 work (the app
+   configures boto3 not to send the extra checksums that R2 rejects). If the
+   upload fails or the file does not appear in the bucket, check the Render
+   logs and report the error.
+6. Sign in as a student with the PIN and open all three.
    - **Video seeking:** drag the video to a later point. It must jump there
-     and keep playing. If it restarts or cannot skip, the R2 CORS rule
-     (`Range` header, exposed headers) is wrong.
+     and keep playing. If it restarts or cannot skip, check in the Cloudflare
+     dashboard that the object has the right size and content type; CORS is
+     not involved for video.
+   - **EPUB:** it must open in the in-page reader. If it does not, check the
+     R2 CORS rule (allowed origin must be the staging address).
 7. **Microsoft sign-in:** with a real school test student account whose email
    matches a library card, choose Sign in with Microsoft. It must land on the
    student's page. Sign out and in again; it must still work (now matched to
@@ -212,31 +266,35 @@ each item in order.
 9. **Backup:** as admin open Backup & Restore and press Backup Now, then
    View Backups. A `.json` file must be listed for download, and it must
    open.
-10. **Redeploy** the service (Manual Deploy) and confirm the uploaded PDF and
-    MP4 still open. This proves files and data survive restarts.
-11. Delete the staging service, Neon branch, bucket and the extra Redirect
+10. **Redeploy** the service (Manual Deploy) and confirm the uploaded PDF, MP4
+    and EPUB still open. This proves files and data survive restarts.
+11. Delete a digital item as admin and confirm its files disappear from the
+    bucket.
+12. After setting `TZ`, issue a book and check its issue date equals today's
+    Indian date.
+13. Delete the staging service, Neon branch, bucket and the extra Redirect
     URI when finished.
 
 ## 7. Domain
 
-1. In the msceducation.net DNS, change the `library` CNAME from
-   `kammaash.github.io` to the Render `*.onrender.com` host shown for your
-   service.
+1. In Render, add the custom domain `library.msceducation.net` to the service.
+   Render then shows the CNAME target (a `*.onrender.com` host) to use.
+2. In the msceducation.net DNS, change the `library` CNAME from
+   `kammaash.github.io` to the target Render showed you.
    - If the domain's DNS is on Cloudflare, set this record to **DNS only**
      (grey cloud), not proxied. A proxied record interferes with Render's
      certificate.
-2. In Render, add the custom domain `library.msceducation.net` to the service
-   and wait until its certificate shows as issued.
-3. Turn off GitHub Pages for the repository: Settings, Pages, Unpublish (or
+3. Wait until the domain's certificate shows as issued in Render.
+4. Turn off GitHub Pages for the repository: Settings, Pages, Unpublish (or
    `gh api -X DELETE repos/kammaash/MSC-Library/pages`).
 
 ## 8. First run
 
-If you started fresh, you already created the admin account at the end of
-step 4; do not leave `/setup` open any longer than that. If you migrated data
-(step 5), sign in with the PC's existing admin account. Either way, confirm
-`https://library.msceducation.net` shows the login page with a valid
-certificate (padlock).
+If you started fresh, you already created the admin account from your own PC
+in step 4, before the Render service existed, so `/setup` was never open to
+the internet. If you migrated data (step 5), sign in with the PC's existing
+admin account. Either way, confirm `https://library.msceducation.net` shows
+the login page with a valid certificate (padlock).
 
 The school logo: a logo uploaded through the app is saved on Render's
 temporary disk and is lost at the next redeploy or restart. To make a logo
@@ -246,13 +304,16 @@ permanent, commit the image to the repository as `static/images/logo_main.png`.
 
 - There is **no restore button in the app**. Neon's point-in-time restore is
   the recovery path: restore from the Neon dashboard if data is damaged or
-  deleted.
+  deleted. On Neon's Free plan point-in-time restore only reaches back
+  **6 hours** (longer windows need a paid Neon plan), so check the data the
+  same day after any bulk import or delete.
 - Admin, Backup Now creates a JSON export of the data in R2 (under
   `uploads/backups/`) and the app also makes one automatically each day. The
   files can be downloaded from View Backups. The JSON export is the school's
   own readable copy of its data (to look things up or keep as a record); it
-  cannot be loaded back into the app.
-- Download one backup **monthly** and keep it somewhere outside these cloud
+  cannot be loaded back into the app. Automatic backups older than 60 days
+  are deleted.
+- Download one backup **weekly** and keep it somewhere outside these cloud
   accounts (for example a school drive). A cloud account problem would
   otherwise take the data and the backups together.
 
@@ -264,6 +325,9 @@ permanent, commit the image to the repository as `static/images/logo_main.png`.
 - **Microsoft sign-in suddenly stopped working for everyone:** the client
   secret has probably expired (see step 3).
 - **Everyone is signed out at random times:** the Render Free plan has
-  restarted after sleeping. Use Starter.
+  restarted after sleeping (use Starter), or the service was redeployed
+  (every push to `main` does this).
 - **Service will not start and logs mention R2 or Entra settings:** one of the
   all-or-nothing groups is only partly filled in.
+- **Need an old error message:** Render keeps logs for 7 days on the
+  Hobby/Free workspace; copy an error out promptly.

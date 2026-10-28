@@ -31,7 +31,11 @@ class FakeEntraApp:
             raise self.raises
         if self.result is not None:
             return self.result
-        return {"id_token_claims": self.claims}
+        if self.claims is None:
+            return {"id_token_claims": None}
+        # A real token carries the app's client id as "aud"; a test can still
+        # override it by putting "aud" in its own claims.
+        return {"id_token_claims": {"aud": "client-1", **self.claims}}
 
 
 @pytest.fixture
@@ -39,6 +43,7 @@ def entra(app_module, monkeypatch):
     fake = FakeEntraApp()
     monkeypatch.setattr(app_module, "ENTRA_ENABLED", True)
     monkeypatch.setattr(app_module, "ENTRA_TENANT_ID", "tenant-1")
+    monkeypatch.setattr(app_module, "ENTRA_CLIENT_ID", "client-1")
     monkeypatch.setattr(app_module, "PUBLIC_BASE_URL", "https://library.example")
     monkeypatch.setattr(app_module, "_entra_app", lambda: fake)
     return fake
@@ -113,6 +118,31 @@ def test_other_tenant_rejected(entra, client):
     r = _sign_in(client)
     assert "ms_error=wrong_school" in r.location
     assert _whoami_role(client) != "student"
+
+
+def test_wrong_audience_rejected(entra, client):
+    m = make_student(email="asha@msc.edu")
+    entra.claims = {**CLAIMS, "aud": "some-other-app"}
+    r = _sign_in(client)
+    assert "ms_error=failed" in r.location
+    assert ctx(lambda: db.session.get(Member, m.id).entra_oid) is None
+    assert _whoami_role(client) != "student"
+
+
+def test_missing_audience_rejected(entra, client):
+    make_student(email="asha@msc.edu")
+    entra.claims = {**CLAIMS, "aud": ""}
+    r = _sign_in(client)
+    assert "ms_error=failed" in r.location
+    assert _whoami_role(client) != "student"
+
+
+def test_staff_clicking_microsoft_button_keeps_staff_session(entra, client):
+    login_as(client, make_admin())
+    r = client.get("/auth/microsoft/login")
+    assert r.status_code == 302 and r.location.endswith("/")
+    assert entra.flow_calls == []
+    assert _whoami_role(client) == "admin"
 
 
 def test_email_bound_to_different_oid_is_not_rebound(entra, client):
@@ -193,9 +223,16 @@ def test_callback_cannot_be_replayed(entra, client):
     entra.claims = CLAIMS
     client.get("/auth/microsoft/login")
     assert "ms_error" not in client.get("/auth/microsoft/callback?code=x&state=y").location
-    client.get("/logout")
+    # /logout is POST-only; a GET would 405 and leave the session signed in.
+    # (The callback clears the session, token included, so give the client's
+    # CSRF header a matching token again.)
+    with client.session_transaction() as sess:
+        sess["_csrf_token"] = "test-csrf"
+    assert client.post("/logout").status_code == 200
+    assert _whoami_role(client) != "student"
     r = client.get("/auth/microsoft/callback?code=x&state=y")
     assert "ms_error=failed" in r.location
+    assert _whoami_role(client) != "student"
 
 
 def test_msal_error_result_fails(entra, client):

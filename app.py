@@ -12,12 +12,14 @@ first time on a fresh database.db redirects to the Setup Wizard
 """
 import os
 import posixpath
+import hashlib
 import io
 import json
 import csv
 import re
 import secrets
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -259,7 +261,10 @@ def _apply_proxy_fix(flask_app, env) -> bool:
     if env.get("LIBRARY_TRUST_PROXY") != "1":
         return False
     from werkzeug.middleware.proxy_fix import ProxyFix
-    flask_app.wsgi_app = ProxyFix(flask_app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+    # x_host stays 0: nothing needs the forwarded host, and trusting it would
+    # let a client choose request.host, which _force_https uses as the target
+    # of its redirect.
+    flask_app.wsgi_app = ProxyFix(flask_app.wsgi_app, x_for=1, x_proto=1, x_host=0)
     return True
 
 
@@ -515,6 +520,12 @@ _PASSWORD_CHANGE_EXEMPT_PREFIXES = ("/static", "/uploads", "/logout")
 _PASSWORD_CHANGE_EXEMPT_PATHS = ("/change-password", "/api/account/change-password", "/api/whoami")
 
 
+# Once the setup flag has been seen as complete it stays complete for the life
+# of this process, so remember that instead of asking the database on every
+# request (on Postgres each check opened a brand-new connection).
+_SETUP_COMPLETE_CACHE = False
+
+
 @app.before_request
 def _require_first_run_setup():
     """
@@ -526,7 +537,11 @@ def _require_first_run_setup():
     """
     if request.path.startswith(_SETUP_EXEMPT_PREFIXES):
         return None
+    global _SETUP_COMPLETE_CACHE
+    if _SETUP_COMPLETE_CACHE:
+        return None
     if security.setup_is_complete(DB_PATH):
+        _SETUP_COMPLETE_CACHE = True
         return None
     if request.path.startswith("/api/"):
         return jsonify({"error": "Initial setup has not been completed.", "setup_required": True}), 403
@@ -651,6 +666,10 @@ def _finish_student_login(member):
                     role="student", member_id=member.id)
         db.session.add(user)
         db.session.commit()
+    # Drop whatever the browser had before signing in (a pre-login session
+    # id/contents an attacker might have planted: session fixation). The next
+    # request issues a fresh CSRF token.
+    session.clear()
     login_user(user)
     session.permanent = False  # dies when the browser fully closes — no staying logged in on a shared school PC
     session["srv"] = SERVER_INSTANCE_ID
@@ -757,6 +776,8 @@ def login():
         security.record_failed_attempt(DB_PATH, client_ip, f"{role_mode}:{username}")
         return jsonify({"error": "Invalid username or password."}), 401
     security.clear_attempts(DB_PATH, client_ip, f"{role_mode}:{username}")
+    # Same session-fixation hygiene as the student path above.
+    session.clear()
     login_user(user)
     session.permanent = False  # dies when the browser fully closes — no staying logged in on a shared school PC
     session["srv"] = SERVER_INSTANCE_ID
@@ -802,6 +823,11 @@ def _microsoft_failure(code):
 def microsoft_login():
     if not ENTRA_ENABLED:
         abort(404)
+    # The callback clears the session and signs in as a student. A staff
+    # member who clicks the button while signed in must not be silently
+    # downgraded to a student session, so send them back to the app.
+    if current_user.is_authenticated and current_user.role != "student":
+        return redirect("/")
     flow = _entra_app().initiate_auth_code_flow(
         ["User.Read"],
         redirect_uri=PUBLIC_BASE_URL + "/auth/microsoft/callback",
@@ -828,9 +854,12 @@ def microsoft_callback():
     if not flow:
         return _microsoft_failure("failed")
 
-    # msal checks the returned state against the flow and the ID token's
-    # signature, issuer, audience, expiry and nonce, and raises or returns an
-    # "error" if any of that is wrong. Only the error code is logged: never
+    # msal checks the returned state against the flow and the nonce in the ID
+    # token, and the token itself arrives over TLS straight from Microsoft's
+    # token endpoint in exchange for our one-time code and PKCE verifier. The
+    # installed msal does NOT verify the ID token's signature, so the tenant
+    # and audience claims are checked below ourselves. msal raises or returns
+    # an "error" if its own checks fail. Only the error code is logged: never
     # the token, the code, or Microsoft's free-text description.
     try:
         result = _entra_app().acquire_token_by_auth_code_flow(flow, request.args.to_dict())
@@ -851,6 +880,9 @@ def microsoft_callback():
     # registration only if the registration allows it; refuse here regardless.
     if tid.lower() != ENTRA_TENANT_ID.lower():
         return _microsoft_failure("wrong_school")
+    # The token must have been issued to this application, not another one.
+    if str(claims.get("aud") or "") != ENTRA_CLIENT_ID:
+        return _microsoft_failure("failed")
 
     email = str(claims.get("preferred_username") or claims.get("email") or "").strip().lower()
 
@@ -1294,17 +1326,45 @@ def next_accession_no():
         count += 1
 
 
+def _whole_number(value, label, default=0):
+    """
+    Parses a count or amount from JSON. Returns (number, None), or
+    (None, error message) when it is not a whole number from 0 to 1,000,000.
+    A missing value gives `default`. Checked here because int() on junk is a
+    500, and a huge number is a database range error (also a 500) on Postgres.
+    """
+    if value is None or value == "":
+        return default, None
+    problem = f"{label} must be a whole number between 0 and 1000000."
+    if isinstance(value, bool):
+        return None, problem
+    if isinstance(value, float):
+        if not value.is_integer():
+            return None, problem
+        value = int(value)
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None, problem
+    if not 0 <= number <= 1_000_000:
+        return None, problem
+    return number, None
+
+
 @app.route("/api/books", methods=["POST"])
 @login_required
 @role_required("admin", "librarian")
 def add_book():
     data = request.get_json()
+    copies, err = _whole_number(data.get("copies"), "Copies", default=1)
+    if err:
+        return jsonify({"error": err}), 400
     acc = data.get("accession_no") or next_accession_no()
     book = Book(
         accession_no=acc, isbn=data.get("isbn"), title=data["title"], author=data.get("author"),
         publisher=data.get("publisher"), edition=data.get("edition"), subject=data.get("subject"),
         class_name=data.get("class_name"), rack_no=data.get("rack_no"),
-        copies=int(data.get("copies", 1)), status="Available",
+        copies=copies, status="Available",
     )
     db.session.add(book)
     db.session.commit()
@@ -1319,12 +1379,17 @@ def add_book():
 def update_book(book_id):
     book = Book.query.get_or_404(book_id)
     data = request.get_json()
+    new_copies = None
+    if "copies" in data:
+        new_copies, err = _whole_number(data["copies"], "Copies", default=1)
+        if err:
+            return jsonify({"error": err}), 400
     for field in ["isbn", "title", "author", "publisher", "edition", "subject",
                   "class_name", "rack_no"]:
         if field in data:
             setattr(book, field, data[field])
-    if "copies" in data:
-        book.copies = int(data["copies"])
+    if new_copies is not None:
+        book.copies = new_copies
     if "status" in data:
         book.status = data["status"]
     db.session.commit()
@@ -1343,20 +1408,35 @@ def delete_book(book_id):
     return jsonify({"ok": True})
 
 
+def _barcode_key(accession_no):
+    """
+    Storage key for a book's barcode image. Accession numbers are typed by
+    staff and could contain characters such as "/" that must not end up in a
+    file name or storage key, so the name goes through secure_filename. That
+    maps different numbers to the same name ("B#1", "B:1" and "B1" all become
+    "B1"), and the later book would silently overwrite the earlier one's
+    image. When the name had to change, a short hash of the real accession
+    number is appended so distinct numbers keep distinct files; plain numbers
+    keep the old <accession>.png name.
+    """
+    name = secure_filename(accession_no)
+    if name != accession_no:
+        digest = hashlib.sha1(accession_no.encode("utf-8")).hexdigest()[:8]
+        name = f"{name}_{digest}"
+    return f"uploads/barcodes/{name}.png"
+
+
 def generate_barcode_for_book(book):
     try:
         import barcode
         from barcode.writer import ImageWriter
-        # Accession numbers are typed by staff and could contain characters
-        # such as "/" that must not end up in a file name or storage key.
-        filename = secure_filename(book.accession_no)
-        if not filename:
+        if not secure_filename(book.accession_no):
             raise ValueError(f"accession number {book.accession_no!r} has no usable file name")
         code = barcode.get("code128", book.accession_no, writer=ImageWriter())
         buf = io.BytesIO()
         code.write(buf)  # PNG bytes in memory; we choose the storage key ourselves
         book.barcode_path = storage.save_bytes(
-            buf.getvalue(), f"uploads/barcodes/{filename}.png", "image/png")
+            buf.getvalue(), _barcode_key(book.accession_no), "image/png")
     except Exception as e:
         app.logger.warning(f"Barcode generation failed: {e}")
 
@@ -1375,6 +1455,7 @@ def next_member_id():
 
 @app.route("/api/members", methods=["GET"])
 @login_required
+@role_required("admin", "librarian", "viewer")
 def list_members():
     q = (request.args.get("q") or "").strip().lower()
     members = Member.query.all()
@@ -1519,6 +1600,7 @@ def generate_qr_for_member(member):
 # --------------------------------------------------------------------------
 @app.route("/api/issues", methods=["GET"])
 @login_required
+@role_required("admin", "librarian", "viewer")
 def list_issues():
     status_filter = request.args.get("status")  # active | overdue | all
     issues = Issue.query.all()
@@ -1535,7 +1617,9 @@ def list_issues():
 def issue_book():
     data = request.get_json()
     acc = data["accession_no"]
-    member_id = data["member_id"]
+    # JSON may carry the id as a number; Postgres will not compare that to
+    # the text column (a 500), so always query with a clean string.
+    member_id = str(data.get("member_id") or "").strip()
     book = Book.query.filter_by(accession_no=acc).first()
     member = Member.query.filter_by(member_id=member_id).first()
     if not book or not member:
@@ -1590,6 +1674,7 @@ def renew_book(issue_id):
 
 @app.route("/api/fines", methods=["GET"])
 @login_required
+@role_required("admin", "librarian", "viewer")
 def list_fines():
     payments = FinePayment.query.all()
     return jsonify([{
@@ -1615,13 +1700,20 @@ def pay_fine(fid):
 @app.route("/api/lost-books", methods=["GET", "POST"])
 @login_required
 def lost_books():
+    # Read access to the registers is staff-only: the student/member role
+    # must not be able to list other members' personal data or loan records.
+    if current_user.role not in ("admin", "librarian", "viewer"):
+        return jsonify({"error": "Forbidden — insufficient role"}), 403
     if request.method == "POST":
         if current_user.role not in ("admin", "librarian"):
             return jsonify({"error": "Forbidden — insufficient role"}), 403
         data = request.get_json()
+        cost, err = _whole_number(data.get("cost"), "Cost", default=0)
+        if err:
+            return jsonify({"error": err}), 400
         record = LostBook(accession_no=data["accession_no"], member_id=data.get("member_id"),
                            lost_date=data.get("lost_date") or today_iso(),
-                           cost=int(data.get("cost", 0)), remarks=data.get("remarks"))
+                           cost=cost, remarks=data.get("remarks"))
         db.session.add(record)
         book = Book.query.filter_by(accession_no=data["accession_no"]).first()
         if book:
@@ -1656,6 +1748,10 @@ def stock_check():
 @app.route("/api/periodicals", methods=["GET", "POST"])
 @login_required
 def periodicals():
+    # Read access to the registers is staff-only: the student/member role
+    # must not be able to list other members' personal data or loan records.
+    if current_user.role not in ("admin", "librarian", "viewer"):
+        return jsonify({"error": "Forbidden — insufficient role"}), 403
     if request.method == "POST":
         if current_user.role not in ("admin", "librarian"):
             return jsonify({"error": "Forbidden — insufficient role"}), 403
@@ -1676,6 +1772,10 @@ def periodicals():
 @app.route("/api/visitors", methods=["GET", "POST"])
 @login_required
 def visitors():
+    # Read access to the registers is staff-only: the student/member role
+    # must not be able to list other members' personal data or loan records.
+    if current_user.role not in ("admin", "librarian", "viewer"):
+        return jsonify({"error": "Forbidden — insufficient role"}), 403
     if request.method == "POST":
         if current_user.role not in ("admin", "librarian"):
             return jsonify({"error": "Forbidden — insufficient role"}), 403
@@ -1705,6 +1805,10 @@ def checkout_visitor(vid):
 @app.route("/api/donations", methods=["GET", "POST"])
 @login_required
 def donations():
+    # Read access to the registers is staff-only: the student/member role
+    # must not be able to list other members' personal data or loan records.
+    if current_user.role not in ("admin", "librarian", "viewer"):
+        return jsonify({"error": "Forbidden — insufficient role"}), 403
     if request.method == "POST":
         if current_user.role not in ("admin", "librarian"):
             return jsonify({"error": "Forbidden — insufficient role"}), 403
@@ -1928,7 +2032,12 @@ def _save_digital_upload(file, subject_hint=None, category_hint=None, title_hint
         raise ValueError(f"'{file.filename}' — unsupported file type. Allowed: {allowed}")
 
     file_category, mime = DIGITAL_LIBRARY_TYPES[ext]
-    safe_name = secure_filename(file.filename) or f"file{ext}"
+    # secure_filename drops non-ASCII letters, so a name such as
+    # "తెలుగు పుస్తకం.pdf" collapses to just "pdf" (the dot goes too). Anything
+    # that does not still end in the real extension gets a neutral name.
+    safe_name = secure_filename(file.filename)
+    if not safe_name or os.path.splitext(safe_name)[1].lower() != ext:
+        safe_name = f"file{ext}"
     token = secrets.token_hex(6)
     stored_name = f"{token}_{safe_name}"
     saved_keys = []
@@ -1964,8 +2073,14 @@ def _save_digital_upload(file, subject_hint=None, category_hint=None, title_hint
 
     title = (title_hint or "").strip()
     if not title:
-        title = os.path.splitext(safe_name)[0].replace("_", " ").replace("-", " ").strip()
-        title = re.sub(r"\s+", " ", title).title() or safe_name
+        # Prefer the name the uploader actually chose (keeps non-ASCII text
+        # such as Telugu); safe_name is only the fallback.
+        original = os.path.basename(file.filename.replace("\\", "/"))
+        title = os.path.splitext(original)[0].replace("_", " ").replace("-", " ").strip()
+        title = re.sub(r"\s+", " ", title).title()
+        if not title:
+            title = os.path.splitext(safe_name)[0].replace("_", " ").replace("-", " ").strip()
+            title = re.sub(r"\s+", " ", title).title() or safe_name
 
     return OnlineBook(
         title=title, subject=(subject_hint or None), category=(category_hint or None), pdf_path=rel_path,
@@ -2051,6 +2166,17 @@ def list_online_books():
     return jsonify([b.to_dict() for b in books])
 
 
+def _download_name(title, file_type):
+    """
+    "<title>.<type>" for send_file(download_name=...). Local mode puts the
+    name into a response header, and Flask raises on CR/LF in it, so control
+    characters and the quote/backslash characters that break a quoted
+    filename are removed. Non-ASCII text is kept.
+    """
+    cleaned = "".join(ch for ch in (title or "") if ord(ch) >= 32 and ch not in '"\\')
+    return f"{cleaned.strip() or 'download'}.{file_type}"
+
+
 def _online_book_target(book):
     """
     Which stored file the reader should get for a digital item, and how:
@@ -2064,7 +2190,7 @@ def _online_book_target(book):
     ext = "." + (book.file_type or "pdf")
     category, mimetype = DIGITAL_LIBRARY_TYPES.get(ext, ("other", "application/octet-stream"))
     inline = category in ("document", "video", "audio", "ebook")
-    download_name = None if inline else f"{book.title}.{book.file_type}"
+    download_name = None if inline else _download_name(book.title, book.file_type)
     return book.pdf_path, mimetype, inline, download_name
 
 
@@ -2220,7 +2346,7 @@ def download_original_online_book(book_id):
     book = OnlineBook.query.get_or_404(book_id)
     category, mimetype = DIGITAL_LIBRARY_TYPES.get("." + (book.file_type or ""), ("other", "application/octet-stream"))
     return _send_stored(book.pdf_path, mimetype=mimetype,
-                        download_name=f"{book.title}.{book.file_type}", expires_in=LINK_TTL_SECONDS)
+                        download_name=_download_name(book.title, book.file_type), expires_in=LINK_TTL_SECONDS)
 
 
 @app.route("/api/online-books", methods=["POST"])
@@ -2258,8 +2384,13 @@ def add_online_book():
         db.session.commit()
     except Exception as e:
         db.session.rollback()
+        # The database has no record of this item, so nothing will ever point
+        # at the objects _save_digital_upload stored: delete them now rather
+        # than leave orphans in the bucket. The keys are still on the (now
+        # detached) object after the rollback.
+        _delete_online_book_files(book)
         app.logger.exception("Digital Library upload failed while saving to the database")
-        return jsonify({"error": "The file was saved but could not be recorded. Please try again."}), 500
+        return jsonify({"error": "Could not save the file. Please try again."}), 500
     return jsonify(book.to_dict()), 201
 
 
@@ -2360,6 +2491,7 @@ def bulk_import_online_books():
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
     created, skipped = 0, []
+    created_books = []
     for f in files:
         if not f.filename:
             continue
@@ -2367,20 +2499,37 @@ def bulk_import_online_books():
         try:
             book = _save_digital_upload(f, subject_hint=shared_subject, category_hint=shared_category)
             book.grade_target = shared_grade
-            db.session.add(book)
-            db.session.flush()
-            _generate_qr_for_online_book(book)
+            # A SAVEPOINT per file: if this file's insert or QR step fails on
+            # Postgres the transaction would otherwise be aborted and every
+            # later file (and the final commit) would fail with it. On error
+            # the savepoint rolls back just this file's rows.
+            with db.session.begin_nested():
+                db.session.add(book)
+                db.session.flush()
+                _generate_qr_for_online_book(book)
             created += 1
-        except ValueError as ve:
-            skipped.append(str(ve))
+            created_books.append(book)
         except Exception as file_err:
             # _save_digital_upload cleans up after itself when storing fails;
             # if we got past it, the objects it stored are now orphans.
             if book is not None:
                 _delete_online_book_files(book)
-            skipped.append(f"{f.filename} ({file_err})")
+            if isinstance(file_err, ValueError):
+                skipped.append(str(file_err))
+            else:
+                app.logger.warning("Bulk import: %s could not be saved: %s", f.filename, file_err)
+                skipped.append(f"{f.filename} (could not be saved)")
 
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        # Nothing was recorded, so every object stored for this request is an
+        # orphan; remove them all before reporting the failure.
+        for book in created_books:
+            _delete_online_book_files(book)
+        app.logger.exception("Digital Library bulk import failed while saving to the database")
+        return jsonify({"error": "Could not save the files. Please try again."}), 500
     return jsonify({"ok": True, "created": created, "skipped": skipped, "total": len(files)})
 
 
@@ -2519,6 +2668,9 @@ def toggle_bookmark(book_id):
             db.session.delete(existing)
             db.session.commit()
         return jsonify({"ok": True, "bookmarked": False})
+    # Without this a missing item reaches the foreign key and is a 500 on Postgres.
+    if db.session.get(OnlineBook, book_id) is None:
+        return jsonify({"error": "Item not found."}), 404
     db.session.add(Bookmark(member_id=member.member_id, online_book_id=book_id, added_date=today_iso()))
     db.session.commit()
     return jsonify({"ok": True, "bookmarked": True})
@@ -2536,6 +2688,9 @@ def toggle_favorite(book_id):
             db.session.delete(existing)
             db.session.commit()
         return jsonify({"ok": True, "favorited": False})
+    # Without this a missing item reaches the foreign key and is a 500 on Postgres.
+    if db.session.get(OnlineBook, book_id) is None:
+        return jsonify({"error": "Item not found."}), 404
     db.session.add(Favorite(member_id=member.member_id, online_book_id=book_id, added_date=today_iso()))
     db.session.commit()
     return jsonify({"ok": True, "favorited": True})
@@ -3060,6 +3215,7 @@ def _pdf_table_response(title, headers, rows, filename):
 
 @app.route("/api/reports/issue-register")
 @login_required
+@role_required("admin", "librarian", "viewer")
 def report_issue_register():
     issues = Issue.query.all()
     rows = [[i.accession_no, i.member_id, i.issue_date, i.due_date,
@@ -3070,6 +3226,7 @@ def report_issue_register():
 
 @app.route("/api/reports/overdue")
 @login_required
+@role_required("admin", "librarian", "viewer")
 def report_overdue():
     issues = [i for i in Issue.query.filter_by(status="Active").all() if i.computed_status() == "Overdue"]
     rows = [[i.accession_no, i.member_id, i.due_date, str(i.current_fine())] for i in issues]
@@ -3079,6 +3236,7 @@ def report_overdue():
 
 @app.route("/api/reports/fine-register")
 @login_required
+@role_required("admin", "librarian", "viewer")
 def report_fine_register():
     payments = FinePayment.query.all()
     rows = [[p.member_id, str(p.amount), p.status, p.paid_date or "-"] for p in payments]
@@ -3088,6 +3246,7 @@ def report_fine_register():
 
 @app.route("/api/reports/member-list")
 @login_required
+@role_required("admin", "librarian", "viewer")
 def report_member_list():
     members = Member.query.all()
     rows = [[m.member_id, m.name, m.type, m.class_dept or "-"] for m in members]
@@ -3097,6 +3256,7 @@ def report_member_list():
 
 @app.route("/api/reports/stock-report")
 @login_required
+@role_required("admin", "librarian", "viewer")
 def report_stock():
     books = Book.query.all()
     rows = [[b.accession_no, b.title, b.computed_status(), str(b.copies)] for b in books]
@@ -3142,6 +3302,7 @@ def duplicate_titles():
 # --------------------------------------------------------------------------
 @app.route("/api/export/<entity>")
 @login_required
+@role_required("admin", "librarian", "viewer")
 def export_excel(entity):
     import pandas as pd
     if entity == "books":
@@ -3239,17 +3400,25 @@ def import_books():
                     copies=max(1, copies),
                     status="Available",
                 )
-                db.session.add(book)
-                db.session.flush()
-                generate_barcode_for_book(book)
+                # A SAVEPOINT per row: a plain db.session.rollback() would also
+                # discard every earlier row of this import (while `created`
+                # kept counting them), and on Postgres a failed statement
+                # aborts the whole transaction. The savepoint undoes only
+                # this row.
+                with db.session.begin_nested():
+                    db.session.add(book)
+                    db.session.flush()
+                    generate_barcode_for_book(book)
                 created += 1
             except Exception as row_err:
                 # one bad row (a stray formula cell, an odd data type, etc.)
                 # should never abort the other 1,000+ good rows in the file
-                db.session.rollback()
                 skipped_error += 1
+                app.logger.warning("Book import: row %s could not be saved: %s", row_num + 2, row_err)
                 if first_error is None:
-                    first_error = f"row {row_num + 2}: {row_err}"
+                    # Never echo the exception: on Postgres it carries the SQL
+                    # statement and its parameters.
+                    first_error = f"row {row_num + 2}: could not be saved"
 
         db.session.commit()
         response = {
@@ -3355,15 +3524,23 @@ def import_members():
                     class_dept=class_dept, phone=phone or None, parent_phone=parent_phone or None,
                     admission_no=admission_no or None, dob=dob_iso, email=email,
                 )
-                db.session.add(member)
-                db.session.flush()
-                generate_qr_for_member(member)
+                # A SAVEPOINT per row. A plain db.session.rollback() here would
+                # also discard every row already flushed by this import (while
+                # `created` kept counting them), and on Postgres a failed
+                # statement aborts the whole transaction. The savepoint undoes
+                # only this row.
+                with db.session.begin_nested():
+                    db.session.add(member)
+                    db.session.flush()
+                    generate_qr_for_member(member)
                 created += 1
             except Exception as row_err:
-                db.session.rollback()
                 skipped_error += 1
+                app.logger.warning("Member import: row %s could not be saved: %s", row_num + 2, row_err)
                 if first_error is None:
-                    first_error = f"row {row_num + 2}: {row_err}"
+                    # Never echo the exception: on Postgres it carries the SQL
+                    # statement and its parameters (other people's data).
+                    first_error = f"row {row_num + 2}: could not be saved"
 
         db.session.commit()
         response = {
@@ -3518,7 +3695,7 @@ def purge_incomplete_books():
 
     for b in removable:
         # delete() ignores missing files and bad keys, so cleanup never fails the request.
-        storage.delete(b.barcode_path or f"uploads/barcodes/{secure_filename(b.accession_no)}.png")
+        storage.delete(b.barcode_path or _barcode_key(b.accession_no))
         db.session.delete(b)
     db.session.commit()
 
@@ -3576,7 +3753,12 @@ def _export_all_tables_json():
 def _save_json_backup(prefix):
     """Writes a JSON export to storage and returns the file's basename."""
     name = f"{prefix}{datetime.now():%Y_%m_%d_%H%M%S}.json"
-    storage.save_bytes(_export_all_tables_json(), BACKUP_PREFIX + name, "application/json")
+    payload = _export_all_tables_json()
+    # The export leaves a Postgres transaction open on this session. Release
+    # the connection before the (possibly slow) upload: Neon's pooler pins a
+    # server connection for as long as a transaction stays open.
+    db.session.remove()
+    storage.save_bytes(payload, BACKUP_PREFIX + name, "application/json")
     return name
 
 
@@ -3613,7 +3795,18 @@ def backup_now():
     fd, tmp_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     try:
-        shutil.copy(DB_PATH, tmp_path)
+        # SQLite's online backup API, not a file copy: the database runs in
+        # WAL mode, so recent commits can still be sitting in database.db-wal
+        # and a plain copy of database.db would silently leave them out.
+        src = sqlite3.connect(DB_PATH)
+        try:
+            dst = sqlite3.connect(tmp_path)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
         storage.save_file(tmp_path, BACKUP_PREFIX + name, "application/octet-stream")
     finally:
         os.remove(tmp_path)

@@ -27,8 +27,8 @@ waitress==3.0.2
 
 # Added for Render + Neon (Postgres) deployment. waitress above is still
 # used for local/offline running (see RUN_SmartLib360.bat); gunicorn is
-# what Render's Procfile actually starts in production. psycopg2-binary
-# is the driver SQLAlchemy needs to talk to Postgres — only used when
+# what Render's Start Command (the same text as `Procfile`) starts in
+# production. psycopg2-binary is the driver SQLAlchemy needs to talk to Postgres — only used when
 # DATABASE_URL is set (see app.py); local SQLite runs never touch it.
 gunicorn==23.0.0
 psycopg2-binary==2.9.10

@@ -882,7 +882,7 @@ function renderOnlineBooks() {
       <h4>${icon} ${escapeHtml(b.title)}</h4>
       <p>${escapeHtml(b.author || '')}${b.author ? ' · ' : ''}${escapeHtml(b.subject || '')}
         ${b.category ? `<br><span class="tag" style="background:var(--parchment-dark); color:var(--navy);">${escapeHtml(b.category)}</span>` : ''}
-        ${IS_STAFF && b.grade_target ? `<span class="tag" style="background:var(--parchment-dark); color:var(--navy);">Class ${b.grade_target}</span>` : ''}
+        ${b.grade_target ? `<span class="tag" style="background:var(--parchment-dark); color:var(--navy);">Class ${b.grade_target}</span>` : ''}
         <br><span class="hint">${label}${sizeStr ? ' · ' + sizeStr : ''}${officeConverted ? ' · readable in-browser' : ''}${b.ocr_applied ? ' · OCR text indexed' : ''}</span></p>
       <div class="io-row">
         ${actionBtn}
@@ -1017,6 +1017,8 @@ const TIMED_MEDIA_TYPES = ['mp4', 'webm', 'mp3', 'wav', 'm4a'];
 const PROGRESS_INTERVAL_MS = 15000;
 let viewerSession = 0;        // bumped on every open/close; stale async work checks it
 let viewerWarnTimer = null;   // fires when the "Need more time" bar is due
+let viewerExpiryTimer = null; // fires when the link actually expires, to update the bar's wording
+let viewerResumeSeconds = 0;  // saved position from /link, used if a renew happens before metadata loads
 let viewerBookId = null;
 let viewerMedia = null;       // the <video>/<audio> element, if any
 let viewerLastProgressSent = 0;
@@ -1043,6 +1045,11 @@ function sendViewerProgress(final) {
   }).catch(() => {});
 }
 
+// Closing the tab doesn't run closeMediaViewer(), so without this up to
+// PROGRESS_INTERVAL_MS (15 s) of watched time would be lost. sendViewerProgress
+// does nothing when no viewer is open, and keepalive lets the request outlive the page.
+window.addEventListener('pagehide', () => sendViewerProgress(true));
+
 function renewBarMessage(link) {
   const left = link.expires_in - link.warn_at;
   if (left >= 300) return 'Your access ends in 5 minutes.';
@@ -1052,11 +1059,31 @@ function renewBarMessage(link) {
 
 function scheduleRenewWarning(link, session) {
   clearTimeout(viewerWarnTimer);
+  clearTimeout(viewerExpiryTimer);
   if (link.expires_in == null || link.warn_at == null) return;
   viewerWarnTimer = setTimeout(() => {
     if (session !== viewerSession) return;
     showRenewBar(link, session);
   }, link.warn_at * 1000);
+  // If the student ignores the bar, "ends in 5 minutes" becomes false once the
+  // link expires, so change the wording then.
+  viewerExpiryTimer = setTimeout(() => {
+    if (session !== viewerSession) return;
+    // The warning timer may never have fired (e.g. a throttled background tab).
+    if (!document.getElementById('renewBar')) showRenewBar(link, session);
+    const msg = document.getElementById('renewMsg');
+    if (msg) msg.textContent = 'Your access has ended. Click Need more time to carry on.';
+    let btn = document.getElementById('renewLinkBtn');
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.id = 'renewLinkBtn';
+      btn.textContent = 'Need more time';
+      btn.addEventListener('click', () => renewViewerLink(session));
+      document.getElementById('renewBar').appendChild(btn);
+    }
+    btn.disabled = false;
+  }, link.expires_in * 1000);
 }
 
 function hideRenewBar() {
@@ -1093,7 +1120,8 @@ async function renewViewerLink(session) {
   if (result.ok) {
     const media = viewerMedia;
     // Swapping src restarts the element, so remember the place and restore it.
-    const resumeAt = media.currentTime;
+    // Before the first loadedmetadata, currentTime is still 0, so fall back to the saved position.
+    const resumeAt = media.readyState > 0 ? media.currentTime : (viewerResumeSeconds || 0);
     const wasPaused = media.paused;
     media.addEventListener('loadedmetadata', () => {
       media.currentTime = resumeAt;
@@ -1104,8 +1132,9 @@ async function renewViewerLink(session) {
     hideRenewBar();
     scheduleRenewWarning(result.data, session);
   } else if (result.status === 401) {
-    msg.innerHTML = 'You\'ve been signed out. <a href="/login" target="_blank" rel="noopener">Sign in again</a> to continue.';
-    btn.remove();
+    // Keep the button: after signing in again in the new tab the student clicks it to carry on.
+    msg.innerHTML = 'You\'ve been signed out. <a href="/login" target="_blank" rel="noopener">Sign in again</a> in the new tab, then click Need more time.';
+    btn.disabled = false;
   } else {
     msg.textContent = 'Could not renew right now. Please try again.';
     btn.disabled = false;
@@ -1126,6 +1155,11 @@ async function openMediaViewer(id, type, title) {
     return;
   }
   if (session !== viewerSession) return;
+  if (result.status === 401) {
+    // Signed out: send them to sign in rather than showing an error toast.
+    window.location.href = '/login';
+    return;
+  }
   if (!result.ok) {
     toast((result.data && result.data.error) || 'Could not open this item.', true);
     return;
@@ -1139,16 +1173,16 @@ async function openMediaViewer(id, type, title) {
   let media = null;
   if (type === 'pdf') {
     wrap.innerHTML = `<div class="pdf-bar"><span id="pdfTitle">${escapeHtml(title)}</span><button class="ghost" id="closePdfBtn">✕ Close</button></div>
-      <iframe id="pdfFrame" src="${url}#toolbar=0&navpanes=0"></iframe>`;
+      <iframe id="pdfFrame" src="${escapeHtml(url)}#toolbar=0&navpanes=0"></iframe>`;
   } else if (['mp4', 'webm'].includes(type)) {
     wrap.innerHTML = `<div class="pdf-bar"><span>${escapeHtml(title)}</span><button class="ghost" id="closePdfBtn">✕ Close</button></div>
-      <video src="${url}" controls autoplay controlsList="nodownload noremoteplayback" disablePictureInPicture oncontextmenu="return false;" style="width:100%; max-height:80vh; background:#000; border-radius:6px;"></video>`;
+      <video src="${escapeHtml(url)}" controls autoplay controlsList="nodownload noremoteplayback" disablePictureInPicture oncontextmenu="return false;" style="width:100%; max-height:80vh; background:#000; border-radius:6px;"></video>`;
     media = wrap.querySelector('video');
   } else if (['mp3', 'wav', 'm4a'].includes(type)) {
     wrap.innerHTML = `<div class="pdf-bar"><span>${escapeHtml(title)}</span><button class="ghost" id="closePdfBtn">✕ Close</button></div>
       <div style="background:var(--parchment); border-radius:8px; padding:40px 20px; text-align:center;">
         <div style="font-size:48px; margin-bottom:12px;">🎧</div>
-        <audio src="${url}" controls autoplay controlsList="nodownload" oncontextmenu="return false;" style="width:100%;"></audio>
+        <audio src="${escapeHtml(url)}" controls autoplay controlsList="nodownload" oncontextmenu="return false;" style="width:100%;"></audio>
       </div>`;
     media = wrap.querySelector('audio');
   } else if (type === 'epub') {
@@ -1165,6 +1199,7 @@ async function openMediaViewer(id, type, title) {
     viewerBookId = id;
     viewerMedia = media;
     viewerLastProgressSent = Date.now();
+    viewerResumeSeconds = link.progress_seconds || 0;
     // Resume where the student left off, unless they were basically done
     // or had only just started.
     media.addEventListener('loadedmetadata', () => {
@@ -1185,6 +1220,9 @@ function closeMediaViewer() {
   viewerSession++;
   clearTimeout(viewerWarnTimer);
   viewerWarnTimer = null;
+  clearTimeout(viewerExpiryTimer);
+  viewerExpiryTimer = null;
+  viewerResumeSeconds = 0;
   viewerMedia = null;
   viewerBookId = null;
   document.getElementById('pdfViewerOverlay').classList.remove('show');
@@ -1194,7 +1232,8 @@ function closeMediaViewer() {
 let EPUBJS_LOADED = false;
 function loadEpubReader(url) {
   function render() {
-    const book = ePub(url);
+    // The /view?src=app URL has no file extension, so epub.js can't infer the type; say it explicitly.
+    const book = ePub(url, { openAs: 'epub' });
     const rendition = book.renderTo("epubArea", { width: "100%", height: "100%" });
     rendition.display();
   }

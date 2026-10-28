@@ -22,6 +22,15 @@ This file deliberately does not import app.py: importing it would run
 init_db() against DATABASE_URL and start the cloud backup scheduler. Both
 databases are read through plain SQLAlchemy reflection instead.
 
+Rows left dangling on the PC are repaired, not fatal: SQLite never enforced
+foreign keys, so deleting a member or a digital item there could leave behind
+a student login (users.member_id) or bookmarks/favorites/read history pointing
+at it, and Postgres refuses those. A nullable reference is cleared and the row
+kept; a required one means the row is skipped. Each case is printed.
+
+Any failure prints one "Migration failed: ..." line and exits 1; add --verbose
+for the full traceback.
+
 Not copied: uploads/backups/. Those are old SQLite backup files made on the
 PC; on the cloud deployment backups are JSON files that the app writes itself.
 """
@@ -29,6 +38,7 @@ import argparse
 import mimetypes
 import os
 import sys
+import traceback
 
 import sqlalchemy as sa
 
@@ -45,17 +55,37 @@ BATCH_SIZE = 500
 # Subfolder of uploads/ that is not copied (see the module docstring).
 SKIPPED_UPLOAD_DIR = "backups"
 
+# How the progress line names the parent a dropped row pointed at, keyed by
+# (table, parent table). Anything not listed falls back to "a deleted row in
+# <parent>".
+PARENT_NAMES = {
+    ("users", "members"): "a deleted member",
+    ("bookmarks", "online_books"): "a deleted digital item",
+    ("favorites", "online_books"): "a deleted digital item",
+    ("read_history", "online_books"): "a deleted digital item",
+}
+
+_TRUE_WORDS = {"1", "true", "t", "yes", "y"}
+_FALSE_WORDS = {"0", "false", "f", "no", "n", ""}
+
 
 def _to_bool(value):
     """SQLite stores booleans as 0/1 (sometimes as text); Postgres BOOLEAN
     columns reject integers, so hand them a real bool. None stays None."""
     if value is None:
         return None
-    if isinstance(value, (int, str)):
+    if isinstance(value, str):
+        # Text must be read as words first: int("False") raises, and falling
+        # back to bool("False") would turn every non-empty string into True.
+        word = value.strip().lower()
+        if word in _TRUE_WORDS:
+            return True
+        if word in _FALSE_WORDS:
+            return False
         try:
-            return bool(int(value))
+            return float(word) != 0
         except ValueError:
-            pass
+            raise ValueError(f"cannot read {value!r} as a true/false value") from None
     return bool(value)
 
 
@@ -65,11 +95,12 @@ def _fix_path(value):
 
 def _sequence_reset_sql(dialect, table_name):
     """After copying rows with explicit ids, Postgres' id sequence still
-    starts at 1 and the next insert would collide; move it past MAX(id)."""
+    starts at 1 and the next insert would collide; make the next id MAX(id)+1
+    (or 1 for an empty table: setval(..., false) means "not yet handed out")."""
     quoted = dialect.identifier_preparer.quote(table_name)
     literal = quoted.replace("'", "''")
     return (f"SELECT setval(pg_get_serial_sequence('{literal}', 'id'), "
-            f"COALESCE(MAX(id), 1)) FROM {quoted}")
+            f"COALESCE(MAX(id), 0) + 1, false) FROM {quoted}")
 
 
 def _has_integer_id(table):
@@ -126,6 +157,12 @@ def copy_database(source_url: str, target_url: str) -> dict:
 
     Returns {table name: rows copied}. Raises RuntimeError, copying nothing,
     if any target table already contains rows.
+
+    Rows whose foreign key points at a parent row that no longer exists are
+    repaired rather than failing the copy (see _copy_table): SQLite never
+    enforced foreign keys, so deleting a member or a digital item on the PC
+    could leave such rows behind, but Postgres refuses them. What was changed
+    is printed, one line per table.
     """
     source_engine = sa.create_engine(_sqlalchemy_database_uri(source_url))
     target_engine = sa.create_engine(_sqlalchemy_database_uri(target_url))
@@ -139,6 +176,7 @@ def copy_database(source_url: str, target_url: str) -> dict:
         _ensure_empty(target_engine, target_meta)
 
         counts = {}
+        repairs = []
         # One transaction: all tables are copied or none are.
         with source_engine.connect() as src, target_engine.begin() as dst:
             # sorted_tables puts parents before the tables that reference them.
@@ -147,22 +185,67 @@ def copy_database(source_url: str, target_url: str) -> dict:
                 if source_table is None:
                     print(f"  {table.name}: not in the source database, skipped")
                     continue
-                counts[table.name] = _copy_table(src, dst, source_table, table)
+                try:
+                    counts[table.name] = _copy_table(src, dst, source_meta, source_table, table, repairs)
+                except Exception as exc:
+                    exc.migration_table = table.name  # for main()'s one-line message
+                    raise
             if target_engine.dialect.name == "postgresql":
                 for table in target_meta.sorted_tables:
                     if table.name in counts and _has_integer_id(table):
                         dst.execute(sa.text(_sequence_reset_sql(target_engine.dialect, table.name)))
+        if repairs:
+            print("Some rows pointed at things that were deleted on the PC:")
+            for line in repairs:
+                print(line)
         return counts
     finally:
         source_engine.dispose()
         target_engine.dispose()
 
 
-def _copy_table(src, dst, source_table, table) -> int:
+def _foreign_key_checks(src, source_meta, table, column_names):
+    """One check per foreign key of the target table: which source columns
+    hold the reference, the set of parent keys that exist in the source, and
+    whether the reference may be cleared (all its columns nullable) or the row
+    must be skipped. A key whose columns, or whose parent table, are missing
+    from the source is not checked (the target would reject it anyway; that
+    is a schema problem, not leftover rows)."""
+    quote = src.dialect.identifier_preparer.quote
+    checks = []
+    for constraint in table.foreign_key_constraints:
+        local = [e.parent.name for e in constraint.elements]
+        remote = [e.column.name for e in constraint.elements]
+        parent = constraint.referred_table
+        parent_source = source_meta.tables.get(parent.name)
+        if not all(name in column_names for name in local):
+            continue
+        if parent_source is None or not all(name in parent_source.c for name in remote):
+            continue
+        select = sa.text(f"SELECT {', '.join(quote(n) for n in remote)} FROM {quote(parent.name)}")
+        keys = {tuple(row) for row in src.execute(select)}
+        checks.append({
+            "local": local,
+            "keys": keys,
+            "parent": parent.name,
+            "clearable": all(table.c[name].nullable for name in local),
+        })
+    return checks
+
+
+def _copy_table(src, dst, source_meta, source_table, table, repairs) -> int:
+    """Copy one table's rows. Rows with a dangling foreign key are repaired in
+    memory as they pass through: a nullable reference (users.member_id) is set
+    to NULL and the row kept; a required one (bookmarks.online_book_id) means
+    the row is skipped. A line per table describing that goes onto repairs."""
     columns = [c for c in table.columns if c.name in source_table.c]
     if not columns:
         return 0
+    names = {c.name for c in columns}
     bool_columns = {c.name for c in columns if isinstance(c.type, sa.Boolean)}
+    checks = _foreign_key_checks(src, source_meta, table, names)
+    skipped = {}   # parent table -> rows skipped
+    cleared = {}   # (parent table, column names) -> rows kept with the reference cleared
     # Read with plain SQL so the source's raw stored values come back as-is,
     # without SQLite's reflected types second-guessing them.
     quote = src.dialect.identifier_preparer.quote
@@ -183,9 +266,32 @@ def _copy_table(src, dst, source_table, table) -> int:
                 elif column.name in bool_columns:
                     value = _to_bool(value)
                 record[column.name] = value
+            dangling = [
+                check for check in checks
+                if all(record[n] is not None for n in check["local"])
+                and tuple(record[n] for n in check["local"]) not in check["keys"]
+            ]
+            required = next((check for check in dangling if not check["clearable"]), None)
+            if required is not None:
+                skipped[required["parent"]] = skipped.get(required["parent"], 0) + 1
+                continue
+            for check in dangling:
+                for n in check["local"]:
+                    record[n] = None
+                key = (check["parent"], ", ".join(check["local"]))
+                cleared[key] = cleared.get(key, 0) + 1
             batch.append(record)
-        dst.execute(table.insert(), batch)
+        if batch:
+            dst.execute(table.insert(), batch)
         copied += len(batch)
+
+    for parent, n in skipped.items():
+        what = PARENT_NAMES.get((table.name, parent), f"a deleted row in {parent}")
+        repairs.append(f"  {table.name}: {n} {'row' if n == 1 else 'rows'} skipped (they pointed at {what})")
+    for (parent, column_list), n in cleared.items():
+        what = PARENT_NAMES.get((table.name, parent), f"a deleted row in {parent}")
+        repairs.append(f"  {table.name}: {column_list} cleared on {n} {'row' if n == 1 else 'rows'} "
+                       f"(they pointed at {what}; the rows themselves were kept)")
     return copied
 
 
@@ -212,13 +318,41 @@ def copy_uploads(uploads_dir: str, target) -> int:
     return count
 
 
+def _short_reason(exc) -> str:
+    """First line of the underlying database error (str(exc.orig)) for
+    SQLAlchemy errors, whose own text carries the whole SQL statement and
+    the row's values; otherwise first line of the exception's message."""
+    if isinstance(exc, sa.exc.DBAPIError) and exc.orig is not None:
+        text = str(exc.orig)
+    else:
+        text = str(exc)
+    lines = text.strip().splitlines()
+    return lines[0].strip() if lines else type(exc).__name__
+
+
 def main(argv=None, env=os.environ) -> int:
     parser = argparse.ArgumentParser(
         description="Copy a school PC's SQLite database and uploads folder into Neon and R2.")
     parser.add_argument("--sqlite", required=True, help="path to the PC's database.db")
     parser.add_argument("--uploads", required=True, help="path to the PC's uploads folder")
+    parser.add_argument("--verbose", action="store_true",
+                        help="print the full Python traceback if the migration fails")
     args = parser.parse_args(argv)
 
+    try:
+        return _run(args, env)
+    except Exception as exc:
+        # One readable line instead of a SQLAlchemy traceback full of SQL and
+        # student data; --verbose is for whoever has to debug it.
+        table = getattr(exc, "migration_table", None)
+        prefix = f"Migration failed: {table}: " if table else "Migration failed: "
+        print(prefix + _short_reason(exc), file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+
+
+def _run(args, env) -> int:
     database_url = (env.get("DATABASE_URL") or "").strip()
     if not database_url:
         print("DATABASE_URL is not set. Point it at the Neon database.", file=sys.stderr)

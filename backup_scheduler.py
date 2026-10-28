@@ -26,7 +26,7 @@ with a sleep loop is simple, easy to reason about, and matches the rest
 of the codebase's preference for small, self-contained solutions.
 """
 import os
-import shutil
+import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
@@ -42,7 +42,18 @@ def _do_backup(db_path, backups_dir, logger=None):
             return
         stamp = datetime.now().strftime("%Y_%m_%d_%H%M%S")
         dest = os.path.join(backups_dir, f"auto_backup_{stamp}.db")
-        shutil.copy(db_path, dest)
+        # The app runs SQLite in WAL mode, so recent rows may still be in
+        # database.db-wal; a plain file copy would miss them. SQLite's online
+        # backup API reads through the WAL and gives a consistent snapshot.
+        src = sqlite3.connect(db_path)
+        try:
+            dst = sqlite3.connect(dest)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
         if logger:
             logger.info(f"Automatic backup created: {os.path.basename(dest)}")
     except Exception as e:
