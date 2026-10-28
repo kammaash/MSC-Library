@@ -12,6 +12,7 @@ first time on a fresh database.db redirects to the Setup Wizard
 """
 import os
 import io
+import json
 import csv
 import re
 import secrets
@@ -3447,33 +3448,112 @@ def purge_incomplete_books():
 # --------------------------------------------------------------------------
 # Backup / Restore
 # --------------------------------------------------------------------------
+BACKUP_PREFIX = "uploads/backups/"
+
+# Backup names look like backup_2026_10_28_141500.json, or the same with an
+# auto_ prefix for scheduler-made ones, and .db for SQLite copies. The stamp
+# is the only thing pruning and sorting trust (never the storage backend's
+# modified time, which R2 resets if an object is ever copied), so a file
+# someone dropped in by hand with any other name is never deleted.
+_BACKUP_NAME_RE = re.compile(r"^(?:auto_)?backup_(\d{4}_\d{2}_\d{2}_\d{6})\.(?:json|db)$")
+
+
+def _backup_stamp(name):
+    m = _BACKUP_NAME_RE.match(name)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%Y_%m_%d_%H%M%S")
+    except ValueError:
+        return None
+
+
+def _export_all_tables_json():
+    """
+    Every table in the database as one UTF-8 JSON document, for backups when
+    the database is Postgres (there is no single file to copy). Reads the
+    live table list instead of the models so the security tables that
+    security.py creates by hand (app_security, login_rate_limits, ...) are
+    included too. Password and PIN hashes are included, same as the SQLite
+    file copy; the bucket is private and downloads are admin-only. Needs an
+    app context. Values JSON cannot represent (dates, Decimals) become
+    strings via default=str.
+    """
+    quote = db.engine.dialect.identifier_preparer.quote
+    tables = {}
+    for name in sorted(sa_inspect(db.engine).get_table_names()):
+        rows = db.session.execute(sa_text(f"SELECT * FROM {quote(name)}")).mappings().all()
+        tables[name] = [dict(r) for r in rows]
+    payload = {"exported_at": datetime.now().isoformat(), "tables": tables}
+    return json.dumps(payload, default=str, ensure_ascii=False).encode("utf-8")
+
+
+def _save_json_backup(prefix):
+    """Writes a JSON export to storage and returns the file's basename."""
+    name = f"{prefix}{datetime.now():%Y_%m_%d_%H%M%S}.json"
+    storage.save_bytes(_export_all_tables_json(), BACKUP_PREFIX + name, "application/json")
+    return name
+
+
+def _prune_backups(retention_days):
+    """Deletes backups whose name-stamp is older than retention_days; returns how many."""
+    cutoff = datetime.now() - timedelta(days=retention_days)
+    removed = 0
+    for key in storage.list_keys(BACKUP_PREFIX):
+        name = key[len(BACKUP_PREFIX):]
+        stamp = _backup_stamp(name)
+        if stamp is not None and stamp < cutoff:
+            storage.delete(key)
+            removed += 1
+            app.logger.info("Pruned old backup: %s", name)
+    return removed
+
+
+def _scheduled_cloud_backup():
+    # Called from the scheduler thread, which has no request or app context.
+    with app.app_context():
+        return _save_json_backup("auto_backup_")
+
+
 @app.route("/api/backup", methods=["POST"])
 @login_required
 @role_required("admin")
 def backup_now():
-    import shutil
-    os.makedirs(app.config["UPLOAD_BACKUPS"], exist_ok=True)
-    stamp = datetime.now().strftime("%Y_%m_%d_%H%M%S")
-    dest = os.path.join(app.config["UPLOAD_BACKUPS"], f"backup_{stamp}.db")
-    shutil.copy(os.path.join(BASE_DIR, "database.db"), dest)
-    return jsonify({"ok": True, "file": os.path.basename(dest)})
+    if _database_url:
+        # Postgres: nothing to copy, and database.db does not exist here.
+        return jsonify({"ok": True, "file": _save_json_backup("backup_")})
+    # SQLite: copy the database file as before, but hand the copy to storage
+    # so the file lands in uploads/backups/ locally and in the bucket on R2.
+    name = f"backup_{datetime.now():%Y_%m_%d_%H%M%S}.db"
+    fd, tmp_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        shutil.copy(DB_PATH, tmp_path)
+        storage.save_file(tmp_path, BACKUP_PREFIX + name, "application/octet-stream")
+    finally:
+        os.remove(tmp_path)
+    return jsonify({"ok": True, "file": name})
 
 
 @app.route("/api/backup/download/<filename>")
 @login_required
 @role_required("admin")
 def download_backup(filename):
-    return send_file(os.path.join(app.config["UPLOAD_BACKUPS"], secure_filename(filename)),
-                      as_attachment=True)
+    safe = secure_filename(filename)
+    if not safe:
+        abort(404)
+    return _send_stored(BACKUP_PREFIX + safe, download_name=safe)
 
 
 @app.route("/api/backup/list")
 @login_required
 @role_required("admin")
 def list_backups():
-    os.makedirs(app.config["UPLOAD_BACKUPS"], exist_ok=True)
-    files = sorted(os.listdir(app.config["UPLOAD_BACKUPS"]), reverse=True)
-    return jsonify(files)
+    names = [key[len(BACKUP_PREFIX):] for key in storage.list_keys(BACKUP_PREFIX)]
+    # Newest first by the stamp in the name: sorting by name alone would put
+    # every auto_backup_ file after every backup_ file whatever its date.
+    names.sort(key=lambda n: (_backup_stamp(n) or datetime.min, n), reverse=True)
+    return jsonify(names)
 
 
 # --------------------------------------------------------------------------
@@ -3608,12 +3688,26 @@ def init_db():
 # and the very first request would crash.
 init_db()
 
-if __name__ == "__main__":
-    backup_scheduler.start_background_backups(
-        db_path=DB_PATH,
-        backups_dir=app.config["UPLOAD_BACKUPS"],
+# On Postgres there is no database file to copy, so the scheduler exports
+# every table to JSON in storage instead. Like init_db() this must sit
+# outside the __main__ guard so gunicorn starts it. Tests never set
+# DATABASE_URL, so they never start this thread.
+if _database_url:
+    backup_scheduler.start_cloud_backups(
+        backup_fn=_scheduled_cloud_backup,
+        prune_fn=_prune_backups,
         logger=app.logger,
     )
+
+if __name__ == "__main__":
+    # The SQLite file copier is pointless (and would back up an empty,
+    # unused database.db) when running against Postgres.
+    if not _database_url:
+        backup_scheduler.start_background_backups(
+            db_path=DB_PATH,
+            backups_dir=app.config["UPLOAD_BACKUPS"],
+            logger=app.logger,
+        )
 
     lan_ip = get_lan_ip()
     hostname = get_hostname()

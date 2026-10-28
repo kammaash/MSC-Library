@@ -14,6 +14,13 @@ background thread (started once, from app.py's __main__ block) that:
   3. Prunes backup files older than BACKUP_RETENTION_DAYS so the backups
      folder doesn't grow forever on a small school PC's disk.
 
+start_background_backups() above copies the SQLite file and is for the
+offline school-PC install. start_cloud_backups() is its counterpart for
+the Render + Neon deployment: the database is not a local file there, so
+the loop is handed two callables from app.py (one that writes a JSON
+export to storage, one that prunes old exports) and has no file logic
+of its own.
+
 Deliberately dependency-free (no APScheduler) — a single daemon thread
 with a sleep loop is simple, easy to reason about, and matches the rest
 of the codebase's preference for small, self-contained solutions.
@@ -81,6 +88,42 @@ def start_background_backups(db_path, backups_dir, logger=None):
     t = threading.Thread(
         target=_loop, args=(db_path, backups_dir, logger),
         name="mslrms-backup-scheduler", daemon=True,
+    )
+    t.start()
+    return t
+
+
+def _cloud_loop(backup_fn, prune_fn, logger):
+    # Same shape as _loop. Each step is wrapped separately so a failed
+    # backup (say Neon is briefly unreachable) still lets the prune run,
+    # and neither can kill the thread — a dead thread would silently mean
+    # no more backups until the next deploy.
+    time.sleep(120)
+    while True:
+        try:
+            name = backup_fn()
+            if logger:
+                logger.info(f"Automatic backup created: {name}")
+        except Exception as e:
+            if logger:
+                logger.warning(f"Automatic backup failed (non-fatal): {e}")
+        try:
+            prune_fn(BACKUP_RETENTION_DAYS)
+        except Exception as e:
+            if logger:
+                logger.warning(f"Backup pruning failed (non-fatal): {e}")
+        time.sleep(BACKUP_INTERVAL_HOURS * 3600)
+
+
+def start_cloud_backups(backup_fn, prune_fn, logger=None):
+    """
+    Cloud counterpart of start_background_backups. backup_fn() takes one
+    backup and returns its name; prune_fn(retention_days) deletes old ones.
+    Daemon thread, so it never blocks process shutdown.
+    """
+    t = threading.Thread(
+        target=_cloud_loop, args=(backup_fn, prune_fn, logger),
+        name="mslrms-cloud-backup-scheduler", daemon=True,
     )
     t.start()
     return t
