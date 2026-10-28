@@ -23,6 +23,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from urllib.parse import urlsplit
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, date, timedelta
@@ -313,8 +314,58 @@ def _force_https():
     return redirect(target, code=301)
 
 
+# Content-Security-Policy: which origins a page may load scripts, images,
+# media, frames and XHR from. script-src 'self' with no 'unsafe-inline' means
+# an injected <script> or onclick="" never runs, which is why the templates
+# keep their code in static/js/ and app.js attaches every handler itself.
+# style-src does allow inline styles: the markup uses style="" throughout, and
+# that is not a script-execution risk. epub.js renders a book through blob:
+# URLs (pages, images, stylesheets), and in R2 mode PDFs, videos, audio, QR
+# codes and EPUB downloads come from presigned links on the bucket's own
+# host, so that origin is allowed for those kinds of content only.
+# Sent with the HTTPS flag, like the other hardening headers, and only on
+# HTML pages: a policy on the PDF response itself can stop the browser's
+# built-in PDF viewer from rendering it.
+_SEND_CSP = _FORCE_HTTPS
+
+
+def _file_link_origin():
+    """
+    scheme://host of the presigned file links, or "" in local mode, where
+    files are served by this app. Taken from the R2 client's endpoint
+    (https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com; links are path-style
+    on that host) so it always matches the links actually handed out.
+    """
+    client = getattr(storage, "client", None)
+    endpoint = getattr(getattr(client, "meta", None), "endpoint_url", None)
+    if not endpoint:
+        return ""
+    parts = urlsplit(endpoint)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def _content_security_policy():
+    files = _file_link_origin()
+    extra = f" {files}" if files else ""
+    return "; ".join([
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self' 'unsafe-inline' blob:",
+        f"img-src 'self' data: blob:{extra}",
+        f"media-src 'self' blob:{extra}",
+        f"frame-src 'self' blob:{extra}",
+        f"connect-src 'self'{extra}",
+        "font-src 'self' data: blob:",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "frame-ancestors 'self'",
+    ])
+
+
 @app.after_request
 def _set_security_headers(response):
+    if _SEND_CSP and response.mimetype == "text/html":
+        response.headers["Content-Security-Policy"] = _content_security_policy()
     if _FORCE_HTTPS:
         # Tells the browser to remember, for a year, to always use HTTPS for
         # this exact site — even a bookmarked or typed http:// link gets

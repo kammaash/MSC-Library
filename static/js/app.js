@@ -81,6 +81,22 @@ function showModal(html) {
 function closeModal() { document.getElementById('modalOverlay').classList.remove('show'); }
 document.getElementById('modalOverlay').addEventListener('click', e => {
   if (e.target.id === 'modalOverlay') closeModal();
+  // Cancel/Close buttons carry data-close-modal: the Content-Security-Policy
+  // forbids inline onclick="" handlers.
+  if (e.target.closest('[data-close-modal]')) closeModal();
+});
+
+// Report buttons (same reason: no inline handlers under the CSP).
+document.querySelectorAll('[data-report-url]').forEach(btn => {
+  btn.addEventListener('click', () => window.open(btn.dataset.reportUrl));
+});
+
+// No right-click menu ("Save video as…") on the viewer's video, audio and
+// PDF frame. Delegated from the overlay because the viewer rebuilds those
+// elements each time it opens; this replaces inline oncontextmenu="" handlers,
+// which the Content-Security-Policy would block.
+document.getElementById('pdfViewerOverlay').addEventListener('contextmenu', e => {
+  if (e.target.closest('video, audio, iframe')) e.preventDefault();
 });
 
 function escapeHtml(s) {
@@ -283,7 +299,7 @@ function bookForm(existing) {
           </select></div>` : ''}
       </div>
       <div class="modal-actions">
-        <button type="button" class="ghost" onclick="closeModal()">Cancel</button>
+        <button type="button" class="ghost" data-close-modal>Cancel</button>
         <button type="submit" class="brass">${existing ? 'Save Changes' : 'Add Book'}</button>
       </div>
     </form>`;
@@ -563,7 +579,7 @@ function memberForm(existing) {
         <div class="field full"><label>School Email <span class="hint">(links the student's Microsoft sign-in${m.ms_linked ? '; a Microsoft account is linked, changing the email unlinks it' : ''})</span></label><input type="email" id="m_email" autocomplete="off" value="${escapeHtml(m.email || '')}"></div>
       </div>
       <div class="modal-actions">
-        <button type="button" class="ghost" onclick="closeModal()">Cancel</button>
+        <button type="button" class="ghost" data-close-modal>Cancel</button>
         <button type="submit" class="brass">${existing ? 'Save Changes' : 'Add Member'}</button>
       </div>
     </form>`;
@@ -719,7 +735,7 @@ document.getElementById('issueBtn').addEventListener('click', async () => {
         <p class="hint" id="i_member_selected"></p>
       </div>
       <div class="modal-actions">
-        <button type="button" class="ghost" onclick="closeModal()">Cancel</button>
+        <button type="button" class="ghost" data-close-modal>Cancel</button>
         <button type="submit" class="brass">Issue Book</button>
       </div>
     </form>`);
@@ -1227,13 +1243,13 @@ async function openMediaViewer(id, type, title) {
       <iframe id="pdfFrame" src="${escapeHtml(url)}#toolbar=0&navpanes=0"></iframe>`;
   } else if (['mp4', 'webm'].includes(type)) {
     wrap.innerHTML = `<div class="pdf-bar"><span>${escapeHtml(title)}</span><button class="ghost" id="closePdfBtn">✕ Close</button></div>
-      <video src="${escapeHtml(url)}" controls autoplay controlsList="nodownload noremoteplayback" disablePictureInPicture oncontextmenu="return false;" style="width:100%; max-height:80vh; background:#000; border-radius:6px;"></video>`;
+      <video src="${escapeHtml(url)}" controls autoplay controlsList="nodownload noremoteplayback" disablePictureInPicture style="width:100%; max-height:80vh; background:#000; border-radius:6px;"></video>`;
     media = wrap.querySelector('video');
   } else if (['mp3', 'wav', 'm4a'].includes(type)) {
     wrap.innerHTML = `<div class="pdf-bar"><span>${escapeHtml(title)}</span><button class="ghost" id="closePdfBtn">✕ Close</button></div>
       <div style="background:var(--parchment); border-radius:8px; padding:40px 20px; text-align:center;">
         <div style="font-size:48px; margin-bottom:12px;">🎧</div>
-        <audio src="${escapeHtml(url)}" controls autoplay controlsList="nodownload" oncontextmenu="return false;" style="width:100%;"></audio>
+        <audio src="${escapeHtml(url)}" controls autoplay controlsList="nodownload" style="width:100%;"></audio>
       </div>`;
     media = wrap.querySelector('audio');
   } else if (type === 'epub') {
@@ -1346,7 +1362,7 @@ document.getElementById('onlineGrid').addEventListener('click', async e => {
       <div style="text-align:center; padding:10px 0;">
         ${book.qr_path ? `<img src="/${book.qr_path}" style="width:220px; height:220px;">` : '<p class="hint">No QR code yet — try Edit &amp; Save to regenerate it.</p>'}
       </div>
-      <div class="modal-actions"><button class="ghost" onclick="closeModal()">Close</button></div>`);
+      <div class="modal-actions"><button class="ghost" data-close-modal>Close</button></div>`);
   }
   if (delBtn) {
     if (!confirm('Delete this item from the Digital Library? The file will be removed too.')) return;
@@ -1404,7 +1420,7 @@ function onlineBookForm(existing) {
         <p class="hint" id="ob_progress_text" style="margin-top:4px;">Uploading... 0%</p>
       </div>
       <div class="modal-actions">
-        <button type="button" class="ghost" onclick="closeModal()">Cancel</button>
+        <button type="button" class="ghost" data-close-modal>Cancel</button>
         <button type="submit" class="brass" id="ob_submit_btn">${existing ? 'Save Changes' : 'Add to Library'}</button>
       </div>
     </form>`;
@@ -1584,7 +1600,7 @@ document.getElementById('addRegisterBtn').addEventListener('click', () => {
     <form id="registerForm">
       ${cfg.fields.map(([id, label, type]) => `<div class="field full"><label>${label}</label><input id="rf_${id}" type="${type}"></div>`).join('')}
       <div class="modal-actions">
-        <button type="button" class="ghost" onclick="closeModal()">Cancel</button>
+        <button type="button" class="ghost" data-close-modal>Cancel</button>
         <button type="submit" class="brass">Add</button>
       </div>
     </form>`);
@@ -1633,7 +1649,7 @@ function userForm(existing) {
         </select>
       </div>
       <div class="modal-actions">
-        <button type="button" class="ghost" onclick="closeModal()">Cancel</button>
+        <button type="button" class="ghost" data-close-modal>Cancel</button>
         <button type="submit" class="brass">${existing ? 'Save Changes' : 'Create'}</button>
       </div>
     </form>`;

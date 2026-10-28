@@ -294,11 +294,11 @@
     <h2>Reports</h2>
     <p class="hint">Generated as PDF, ready to print or save.</p>
     <div class="io-row">
-      <button class="brass" onclick="window.open('/api/reports/issue-register')">Issue Register</button>
-      <button class="brass" onclick="window.open('/api/reports/overdue')">Overdue Books</button>
-      <button class="brass" onclick="window.open('/api/reports/fine-register')">Fine Register</button>
-      <button class="brass" onclick="window.open('/api/reports/member-list')">Member List</button>
-      <button class="brass" onclick="window.open('/api/reports/stock-report')">Stock Report</button>
+      <button class="brass" data-report-url="/api/reports/issue-register">Issue Register</button>
+      <button class="brass" data-report-url="/api/reports/overdue">Overdue Books</button>
+      <button class="brass" data-report-url="/api/reports/fine-register">Fine Register</button>
+      <button class="brass" data-report-url="/api/reports/member-list">Member List</button>
+      <button class="brass" data-report-url="/api/reports/stock-report">Stock Report</button>
     </div>
 
     <h3 class="home-section-title">🔍 Possible Duplicate Titles</h3>
@@ -353,7 +353,7 @@
 <div id="pdfViewerOverlay">
   <div class="pdf-frame-wrap">
     <div class="pdf-bar"><span id="pdfTitle"></span><button class="ghost" id="closePdfBtn" style="color:#fff;border-color:#fff;">Close</button></div>
-    <iframe id="pdfFrame" oncontextmenu="return false;"></iframe>
+    <iframe id="pdfFrame"></iframe>
   </div>
 </div>
 
