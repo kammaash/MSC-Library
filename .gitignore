@@ -36,3 +36,9 @@ dist/
 Thumbs.db
 .vscode/
 .idea/
+
+# Neon CLI: `neon link` writes project/branch IDs to .neon and pulls the
+# branch's DATABASE_URL (with its password) into .env / .env.local
+.neon
+.env
+.env.*
