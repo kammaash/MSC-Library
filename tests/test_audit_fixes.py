@@ -356,7 +356,7 @@ def test_sqlite_backup_contains_recent_rows(client, app_module):
     make_student(admission_no="WAL1")
     login_as(client, make_admin())
     name = client.post("/api/backup").get_json()["file"]
-    key = "uploads/backups/" + name
+    key = "backups/" + name
     path = app_module.storage.local_path(key)
     try:
         conn = sqlite3.connect(path)

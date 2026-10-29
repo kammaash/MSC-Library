@@ -211,9 +211,10 @@ into a database that already holds data).
 The script prints each table's row count; compare them with the PC's counts.
 It copies only columns that exist on both sides. It uploads the files first,
 then copies the rows in one transaction. If it fails part-way the database is
-still empty and you can run it again. Old `uploads/backups/` files are not
-copied. Afterwards, sign in with the PC's existing admin account instead of
-using `/setup`.
+still empty and you can run it again. The PC's old SQLite backups
+(`backups/`, or `uploads/backups/` on older installs) are not copied.
+Afterwards, sign in with the PC's existing admin account instead of using
+`/setup`.
 
 **Then fix the QR codes.** The digital-item QR codes copied from the PC point
 at the old school-network address. Sign in as admin, open **QR Code Library**,
@@ -429,7 +430,7 @@ permanent, commit the image to the repository as `static/images/logo_main.png`.
   **6 hours** (longer windows need a paid Neon plan), so check the data the
   same day after any bulk import or delete.
 - Admin, Backup Now creates a JSON export of the data in R2 (under
-  `uploads/backups/`) and the app also makes one automatically each day. The
+  `backups/`) and the app also makes one automatically each day. The
   files can be downloaded from View Backups. The JSON export is the school's
   own readable copy of its data (to look things up or keep as a record); it
   cannot be loaded back into the app. Automatic backups older than 60 days

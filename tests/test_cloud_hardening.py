@@ -119,7 +119,7 @@ def test_import_failure_is_a_fixed_message(client, app_module, monkeypatch, url)
 # ---- backups are only reachable through the admin download route ----
 def _put_backup(app_module, name="backup_2026_01_01_000000.json"):
     import os
-    key = "uploads/backups/" + name
+    key = "backups/" + name
     path = app_module.storage.local_path(key)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as f:
@@ -140,7 +140,7 @@ def test_backups_are_not_served_from_uploads_route(client, app_module):
         r = client.get(f"/api/backup/download/{name}")
         assert r.status_code == 200 and r.data == b'{"tables": {}}'
     finally:
-        app_module.storage.delete("uploads/backups/" + name)
+        app_module.storage.delete("backups/" + name)
 
 
 def test_backups_not_served_from_uploads_route_on_r2(client, r2):
@@ -150,9 +150,9 @@ def test_backups_not_served_from_uploads_route_on_r2(client, r2):
     assert client.get("/api/backup/download/b.json").status_code == 302
 
 
-def test_other_uploads_are_still_served(client, sample_book):
+def test_digital_library_files_are_still_served(client, sample_book):
     login_as(client, make_admin())
-    assert client.get("/uploads/videos/sample.mp4").status_code == 200
+    assert client.get("/" + sample_book.pdf_path).status_code == 200
 
 
 # ---- /progress bounds ----

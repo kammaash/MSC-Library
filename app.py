@@ -11,7 +11,6 @@ first time on a fresh database.db redirects to the Setup Wizard
 (/setup), where the school creates its own admin username and password.
 """
 import os
-import posixpath
 import hashlib
 import io
 import json
@@ -48,7 +47,7 @@ from models import (
 )
 import security
 import backup_scheduler
-from storage import get_storage
+from storage import get_storage, normalize_key
 
 def _get_base_dir():
     """
@@ -525,7 +524,45 @@ def inject_school_name():
 app.config["MAX_FORM_PARTS"] = 5000  # generous headroom for large bulk-import batches
 app.config["UPLOAD_BARCODES"] = os.path.join(BASE_DIR, "uploads", "barcodes")
 app.config["UPLOAD_QRCODES"] = os.path.join(BASE_DIR, "uploads", "qrcodes")
-app.config["UPLOAD_BACKUPS"] = os.path.join(BASE_DIR, "uploads", "backups")
+# Backups sit next to uploads/, not inside it: /uploads/<path> serves from
+# uploads/, so backups (which hold every table) can never be reached through
+# it even if that route's checks regress. Admins get them through
+# /api/backup/download.
+app.config["UPLOAD_BACKUPS"] = os.path.join(BASE_DIR, "backups")
+
+
+def _move_legacy_backups(base_dir=None):
+    """
+    One-time move of backups from the old uploads/backups/ folder to backups/.
+
+    School-PC installs made before backups left the served tree still have
+    their .db files in BASE_DIR/uploads/backups/. Each file is moved with
+    os.replace; one whose name already exists in backups/ is left where it is
+    (never overwritten), and the old folder is removed only once it is empty.
+    Safe to call again: with no old folder it does nothing.
+
+    Local disk only. R2 needs no migration because this branch was never
+    deployed, so no uploads/backups/ objects exist in a real bucket.
+    """
+    base_dir = base_dir or BASE_DIR
+    old_dir = os.path.join(base_dir, "uploads", "backups")
+    new_dir = os.path.join(base_dir, "backups")
+    if not os.path.isdir(old_dir):
+        return
+    os.makedirs(new_dir, exist_ok=True)
+    for name in os.listdir(old_dir):
+        src = os.path.join(old_dir, name)
+        dst = os.path.join(new_dir, name)
+        if os.path.isfile(src) and not os.path.exists(dst):
+            os.replace(src, dst)
+    try:
+        os.rmdir(old_dir)  # fails, harmlessly, while anything is left in it
+    except OSError:
+        pass
+
+
+if not storage.remote:
+    _move_legacy_backups()
 # Scratch space for incoming digital-library uploads (see _save_digital_upload).
 _UPLOAD_WORK_DIR = os.path.join(BASE_DIR, "upload_tmp")
 app.config["REPORTS_DIR"] = os.path.join(BASE_DIR, "reports", "pdf")
@@ -1371,6 +1408,11 @@ def _send_stored(key, *, mimetype=None, download_name=None, expires_in=FILE_LINK
                      download_name=download_name)
 
 
+# The uploads/ folders the browser is allowed to fetch directly: member and
+# digital-item QR codes, book barcodes, and the digital library's files.
+SERVABLE_UPLOAD_FOLDERS = frozenset({"qrcodes", "barcodes", "pdfs"})
+
+
 @app.route("/uploads/<path:subpath>")
 @login_required
 def serve_upload(subpath):
@@ -1383,25 +1425,32 @@ def serve_upload(subpath):
     Requires login, same as everything else in the app, and only ever
     serves keys under uploads/ (storage rejects path traversal).
 
-    Backups also live under uploads/ but hold every table, children's records
-    included, so they are never served from here: admins get them through
-    /api/backup/download. The check is on the normalised, lower-cased path
-    because Windows file systems ignore case and treat "\\" as a separator.
+    Only the folders listed in SERVABLE_UPLOAD_FOLDERS are reachable, one
+    file deep. Backups hold every table, children's records included, so
+    they live in backups/ next to uploads/ (never under it) and admins get
+    them through /api/backup/download. An allowlist rather than a
+    "not backups/" check because the file is opened through realpath and
+    Windows treats "backups." or "BACKUP~1" as the same folder as "backups"
+    while a string comparison does not; a folder that is not on the list is a
+    404 whatever it is called.
     """
-    folder = posixpath.normpath(subpath.replace("\\", "/")).lstrip("/").lower()
-    if folder == "backups" or folder.startswith("backups/"):
+    try:
+        key = normalize_key(f"uploads/{subpath}")
+    except ValueError:
+        abort(404)
+    parts = key.split("/")
+    if len(parts) != 3 or parts[1].lower() not in SERVABLE_UPLOAD_FOLDERS:
         abort(404)
     # Member QR codes carry "MemberID|Name|Class", so a student may fetch
     # only their own, plus the digital items' QR codes (which only point at
     # an item). Staff and viewers see them all. 404 rather than 403, so the
     # answer does not reveal which member ids exist.
-    if folder.startswith("qrcodes/") and current_user.role not in ("admin", "librarian", "viewer"):
-        key = f"uploads/{subpath}"
+    if parts[1].lower() == "qrcodes" and current_user.role not in ("admin", "librarian", "viewer"):
         own = (current_user.member_id is not None
                and Member.query.filter_by(id=current_user.member_id, qr_path=key).first() is not None)
         if not own and OnlineBook.query.filter_by(qr_path=key).first() is None:
             abort(404)
-    return _send_stored(f"uploads/{subpath}")
+    return _send_stored(key)
 
 
 @app.route("/api/whoami")
@@ -4070,7 +4119,7 @@ def purge_incomplete_books():
 # --------------------------------------------------------------------------
 # Backup / Restore
 # --------------------------------------------------------------------------
-BACKUP_PREFIX = "uploads/backups/"
+BACKUP_PREFIX = "backups/"
 
 # Backup names look like backup_2026_10_28_141500.json, or the same with an
 # auto_ prefix for scheduler-made ones, and .db for SQLite copies. The stamp
@@ -4150,7 +4199,7 @@ def backup_now():
         # Postgres: nothing to copy, and database.db does not exist here.
         return jsonify({"ok": True, "file": _save_json_backup("backup_")})
     # SQLite: copy the database file as before, but hand the copy to storage
-    # so the file lands in uploads/backups/ locally and in the bucket on R2.
+    # so the file lands in backups/ locally and in the bucket on R2.
     name = f"backup_{datetime.now():%Y_%m_%d_%H%M%S}.db"
     fd, tmp_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
@@ -4362,7 +4411,7 @@ if __name__ == "__main__":
     if not security.setup_is_complete(DB_PATH):
         print("  FIRST RUN: no admin account exists yet — open the link above")
         print("  and you will be taken to the Setup Wizard to create one.")
-    print("  Automatic daily backups are enabled (uploads/backups/).")
+    print("  Automatic daily backups are enabled (backups/).")
     print(f"  Full activity/error log: logs/app.log (share this file if something breaks)")
     print("=" * 64)
 

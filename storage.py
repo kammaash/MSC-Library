@@ -19,18 +19,41 @@ from urllib.parse import quote
 R2_ENV_VARS = ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_NAME")
 
 
+# Win32 maps these names to devices (with or without an extension, any case).
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{n}" for n in range(1, 10)}
+    | {f"LPT{n}" for n in range(1, 10)}
+)
+_WINDOWS_BAD_CHARS = frozenset('~:*?"<>|')
+
+
+def _is_aliasable_segment(part: str) -> bool:
+    """True if Windows could resolve this segment to a different name."""
+    if part[-1] in ". ":
+        return True
+    if any(ch in _WINDOWS_BAD_CHARS or ord(ch) < 32 or ord(ch) == 127 for ch in part):
+        return True
+    return part.split(".", 1)[0].upper() in _WINDOWS_DEVICE_NAMES
+
+
 def normalize_key(key: str) -> str:
     """Return the canonical form of a storage key.
 
     Backslashes become '/', leading '/' is dropped. Non-string input, an empty
     result, a trailing '/', and any empty, '.' or '..' segment (so "a//b",
     "a/./b", "a/../b") are rejected: a key must name one file and can never
-    point outside the storage root.
+    point outside the storage root. Segments Windows would resolve to a
+    different name are rejected too (a trailing '.' or space, '~' 8.3 short
+    names, ':' alternate data streams, wildcard/control characters, reserved
+    device names like NUL or COM1), because a string check on the key
+    ("backups.") would then disagree with the file the OS opens ("backups").
     """
     if not isinstance(key, str):
         raise ValueError(f"invalid storage key: {key!r}")
     cleaned = key.replace("\\", "/").lstrip("/")
-    if not cleaned or any(part in ("", ".", "..") for part in cleaned.split("/")):
+    parts = cleaned.split("/")
+    if not cleaned or any(part in ("", ".", "..") or _is_aliasable_segment(part) for part in parts):
         raise ValueError(f"invalid storage key: {key!r}")
     return cleaned
 
@@ -61,6 +84,14 @@ class LocalStorage:
         # anything else that resolves outside the base directory.
         if os.path.commonpath([base, path]) != base:
             raise ValueError(f"storage key escapes base directory: {key!r}")
+        # The resolved segments must be the key's own segments. A symlink or an
+        # OS-level alias (Windows short names, trailing dots) that points at a
+        # different name would let a caller's string check on the key ("not
+        # backups/") disagree with the file actually opened. Case is ignored:
+        # case-insensitive filesystems keep the caller's spelling anyway.
+        resolved = os.path.relpath(path, base).replace(os.sep, "/").split("/")
+        if [p.lower() for p in resolved] != [p.lower() for p in key.split("/")]:
+            raise ValueError(f"storage key resolves to a different path: {key!r}")
         return path
 
     def save_file(self, src_path: str, key: str, content_type: str | None = None,

@@ -35,7 +35,7 @@ On first run with a fresh database the app redirects to the Setup Wizard
   PyInstaller (`MontessoriDigitalLibrary.spec`).
 
 With none of these variables set the app runs exactly as a school-PC install:
-SQLite database and files under `uploads/`.
+SQLite database, files under `uploads/` and backups under `backups/`.
 
 ## Environment variables
 
@@ -51,7 +51,7 @@ of them. For the cloud values and how to get them, use the table in
 | `LIBRARY_SETUP_TOKEN` | With `LIBRARY_FORCE_HTTPS_COOKIES=1`, `/setup` only works as `/setup?token=<value>`; setup is refused if this is unset. Not needed when the flag is off | Cloud. Not needed on a PC |
 | `LIBRARY_TRUST_PROXY` | `1` = trust one proxy hop (`X-Forwarded-For` and `X-Forwarded-Proto`), so sign-in lockouts use the real client address | Cloud (Render). Do not set on a PC |
 | `PUBLIC_BASE_URL` | Public https address of the site, no trailing slash. Used in QR codes and as the Microsoft redirect address | Cloud; required with `ENTRA_*` |
-| `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` | Store uploads and backups in a Cloudflare R2 bucket instead of the `uploads/` folder. All four or none | Cloud |
+| `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` | Store uploads and backups in a Cloudflare R2 bucket instead of the `uploads/` and `backups/` folders. All four or none | Cloud |
 | `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET` | "Sign in with Microsoft" for students. All three or none (and `PUBLIC_BASE_URL`) | Optional (cloud) |
 | `LIBRARY_LINK_TTL_SECONDS` | How long a link to a PDF, video or audio file stays valid; default 1800. Lower it only to test "Need more time" | Optional |
 | `LIBRARY_BIND_HOST` | Address the built-in server listens on; default `0.0.0.0`. Set `127.0.0.1` behind Nginx on a VPS | Optional (VPS) |
@@ -65,5 +65,5 @@ operating system so that dates and fines use Indian time. A half-filled
 ## Never commit
 
 This repo is public. `database.db` (student and library data),
-`instance_secret.key` (session signing key), `uploads/`, `reports/` and
+`instance_secret.key` (session signing key), `uploads/`, `backups/`, `reports/` and
 `logs/` are gitignored — keep them that way.

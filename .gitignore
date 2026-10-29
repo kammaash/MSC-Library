@@ -5,11 +5,11 @@ database.db-shm
 uploads/pdfs/*
 uploads/barcodes/*
 uploads/qrcodes/*
-uploads/backups/*
+backups/*
 !uploads/pdfs/.gitkeep
 !uploads/barcodes/.gitkeep
 !uploads/qrcodes/.gitkeep
-!uploads/backups/.gitkeep
+!backups/.gitkeep
 reports/
 logs/
 upload_tmp/

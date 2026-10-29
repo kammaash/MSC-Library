@@ -31,8 +31,9 @@ kept; a required one means the row is skipped. Each case is printed.
 Any failure prints one "Migration failed: ..." line and exits 1; add --verbose
 for the full traceback.
 
-Not copied: uploads/backups/. Those are old SQLite backup files made on the
-PC; on the cloud deployment backups are JSON files that the app writes itself.
+Not copied: the PC's backups/ folder (uploads/backups/ on installs older
+than October 2026). Those are old SQLite backup files made on the PC; on the
+cloud deployment backups are JSON files that the app writes itself.
 """
 import argparse
 import mimetypes
@@ -328,8 +329,10 @@ def _copy_table(src, dst, source_meta, source_table, table, repairs) -> int:
 def copy_uploads(uploads_dir: str, target) -> int:
     """Upload every file under uploads_dir to target as uploads/<relative path>.
 
-    Dotfiles (.gitkeep, .DS_Store, ...) and the uploads/backups/ folder (old
-    SQLite backups, not wanted in the bucket) are skipped. Returns the number
+    Dotfiles (.gitkeep, .DS_Store, ...) and an uploads/backups/ folder (old
+    SQLite backups, not wanted in the bucket) are skipped. Current installs
+    keep backups in backups/ beside uploads/, which is never walked; the skip
+    covers PCs that have not started the new version yet. Returns the number
     of files uploaded.
     """
     count = 0
@@ -408,7 +411,7 @@ def _run(args, env) -> int:
     # Files first, database last: the database copy is the step that makes the
     # target non-empty, so if the upload fails the script can just be re-run.
     ensure_target_empty(database_url)
-    print("Copying uploaded files (uploads/backups/ is skipped)...")
+    print("Copying uploaded files (backups are skipped)...")
     files = copy_uploads(args.uploads, storage)
     print(f"  {files} files")
     print("Copying database rows...")

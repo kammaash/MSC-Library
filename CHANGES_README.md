@@ -38,6 +38,10 @@
   also from the R2 bucket's host. The login, setup and change-password
   scripts moved to `static/js/`, and no page uses inline `onclick=` handlers
   any more.
+- **Backups moved to `backups/`**, next to `uploads/` instead of inside it.
+  An existing PC install's `uploads/backups/` files are moved there
+  automatically on first start. `/uploads/` now serves only `qrcodes/`,
+  `barcodes/` and `pdfs/`; backups are admin downloads only.
 - Over-long text (a name, rack number, title… longer than its database
   column) is now refused with a message naming the field instead of a
   server error on Postgres; Excel imports skip such rows and count them.
@@ -327,7 +331,7 @@ to a live school**, ideally on a copy first.
 4. **Automated daily backups.** A daemon thread (`backup_scheduler.py`)
    starts when the app starts: first backup ~2 minutes after startup,
    then every 24 hours for as long as the process runs, writing to the
-   same `uploads/backups/` folder the existing manual "Backup Now"
+   same `backups/` folder the existing manual "Backup Now"
    button already uses. Backups older than 60 days are pruned
    automatically so the folder doesn't grow forever. Both numbers are
    constants at the top of the file if you want to tune them.

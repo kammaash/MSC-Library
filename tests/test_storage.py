@@ -37,6 +37,58 @@ def test_normalize_key_rejects_empty_and_dot_segments():
             normalize_key(bad)
 
 
+def test_normalize_key_rejects_trailing_dot_or_space_segments():
+    # Win32 strips a trailing '.' or ' ' from each segment, so "backups." would
+    # open the real "backups" folder while a string check sees something else.
+    for bad in ("uploads/backups./x.db", "uploads/backups /x.db", "uploads/qrcodes./a.png",
+                "x.db.", "uploads/x.db ", "uploads\\backups.\\x.db"):
+        with pytest.raises(ValueError):
+            normalize_key(bad)
+
+
+def test_normalize_key_rejects_short_name_and_stream_characters():
+    for bad in ("uploads/BACKUP~1/x.db", "uploads/backups:$DATA", "uploads/backups/x.db:stream",
+                "uploads/a*b.png", "uploads/a?b.png", 'uploads/a"b.png', "uploads/a<b.png",
+                "uploads/a>b.png", "uploads/a|b.png"):
+        with pytest.raises(ValueError):
+            normalize_key(bad)
+
+
+def test_normalize_key_rejects_control_characters():
+    for bad in ("uploads/a\x00b.png", "uploads/a\nb.png", "uploads/a\tb.png",
+                "uploads/a\x1fb.png", "uploads/a\x7fb.png"):
+        with pytest.raises(ValueError):
+            normalize_key(bad)
+
+
+def test_normalize_key_rejects_windows_device_names():
+    bad_keys = ["uploads/nul", "uploads/CON.txt", "uploads/com1.png", "PRN", "uploads/Aux/x.png",
+                "uploads/lpt9.pdf", "uploads/nul.tar.gz"]
+    bad_keys += [f"uploads/COM{n}" for n in range(1, 10)] + [f"uploads/lpt{n}.x" for n in range(1, 10)]
+    for bad in bad_keys:
+        with pytest.raises(ValueError):
+            normalize_key(bad)
+
+
+def test_normalize_key_accepts_keys_the_app_writes():
+    good = [
+        "uploads/qrcodes/MSS-M-0001.png",
+        "uploads/qrcodes/online_5.png",
+        "uploads/barcodes/my_book_1a2b3c4d.png",
+        "uploads/pdfs/my_book_token.epub",
+        "uploads/backups/auto_backup_2026_10_29_081502.db",
+        "uploads/backups/auto_backup_2026_10_29.db",
+        "uploads/pdfs/\u0c2a\u0c41\u0c38\u0c4d\u0c24\u0c15\u0c02.pdf",
+        "uploads/pdfs/my book.pdf",
+        "uploads/pdfs/.hidden",
+        "uploads/console.txt",
+        "uploads/com10.png",
+        "uploads/nullable.png",
+    ]
+    for key in good:
+        assert normalize_key(key) == key
+
+
 def test_list_keys_still_accepts_trailing_slash_prefix(tmp_path):
     s = LocalStorage(str(tmp_path)); s.save_bytes(b"x", "uploads/a/x.png")
     assert s.list_keys("uploads/a/") == ["uploads/a/x.png"]
@@ -113,6 +165,30 @@ def test_local_path_stays_inside_base_dir(tmp_path):
     with pytest.raises(ValueError):
         s.local_path("../etc/passwd")
     assert s.local_path("uploads/a.pdf").startswith(os.path.realpath(str(tmp_path)))
+
+
+def test_local_path_rejects_symlink_alias_of_another_folder(tmp_path):
+    (tmp_path / "uploads" / "backups").mkdir(parents=True)
+    (tmp_path / "uploads" / "backups" / "x.db").write_bytes(b"db")
+    os.symlink("backups", tmp_path / "uploads" / "alias")
+    s = LocalStorage(str(tmp_path))
+    with pytest.raises(ValueError):
+        s.local_path("uploads/alias/x.db")
+    real = os.path.realpath(tmp_path / "uploads" / "backups" / "x.db")
+    assert s.local_path("uploads/backups/x.db") == real
+
+
+def test_local_path_segment_compare_ignores_case(tmp_path):
+    (tmp_path / "uploads" / "backups").mkdir(parents=True)
+    (tmp_path / "uploads" / "backups" / "x.db").write_bytes(b"db")
+    # Must not raise whether the filesystem is case-sensitive or not.
+    LocalStorage(str(tmp_path)).local_path("uploads/BACKUPS/x.db")
+
+
+def test_local_path_still_works_for_missing_files(tmp_path):
+    s = LocalStorage(str(tmp_path))
+    path = s.local_path("uploads/pdfs/new book.pdf")
+    assert path == os.path.join(os.path.realpath(str(tmp_path)), "uploads", "pdfs", "new book.pdf")
 
 
 def test_local_list_keys_empty_when_prefix_missing(tmp_path):

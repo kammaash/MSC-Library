@@ -193,9 +193,13 @@ def sample_book(app_module):
     that swap in the r2 fixture."""
     from models import OnlineBook
 
-    key = "uploads/videos/sample.mp4"
+    key = "uploads/pdfs/sample.mp4"  # the app keeps every digital file under pdfs/
     path = os.path.join(app_module.BASE_DIR, *key.split("/"))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as f:
         f.write(b"not really a video")
-    return _persist(OnlineBook(title="Sample", pdf_path=key, file_type="mp4"))
+    yield _persist(OnlineBook(title="Sample", pdf_path=key, file_type="mp4"))
+    # The data dir is shared by the whole session and other tests assert
+    # uploads/pdfs/ is empty after an R2 upload, so leave nothing behind.
+    if os.path.exists(path):
+        os.remove(path)
