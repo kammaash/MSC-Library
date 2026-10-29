@@ -245,26 +245,60 @@ else:
     app = Flask(__name__)
 
 
+# Upper bound for LIBRARY_TRUST_PROXY. Render needs 3; anything far above
+# that is a typo, and trusting more hops than really exist makes the app
+# fall back to the nearest proxy's address for everyone.
+_MAX_PROXY_HOPS = 10
+
+
+def _trusted_proxy_hops(env) -> int:
+    """
+    How many proxies in front of the app to trust, from LIBRARY_TRUST_PROXY:
+    0 when unset/empty/"0", otherwise the number. Anything else stops the app
+    at startup, like a half-filled R2 or Entra group, rather than quietly
+    running with the wrong client address.
+    """
+    raw = (env.get("LIBRARY_TRUST_PROXY") or "").strip()
+    if raw in ("", "0"):
+        return 0
+    if not raw.isdigit() or not 1 <= int(raw) <= _MAX_PROXY_HOPS:
+        raise RuntimeError(
+            f"LIBRARY_TRUST_PROXY must be a whole number from 0 to {_MAX_PROXY_HOPS} "
+            f"(the number of proxies in front of the app; 3 on Render), not {raw!r}."
+        )
+    return int(raw)
+
+
 def _apply_proxy_fix(flask_app, env) -> bool:
-    """Trust one reverse proxy's X-Forwarded-* headers, only when asked to.
+    """Trust the reverse proxies' X-Forwarded-* headers, only when asked to.
 
     Returns True when ProxyFix was applied. Off by default on purpose: on a
     school LAN nothing sits in front of the app, so X-Forwarded-For is pure
     client-supplied input and trusting it would let anyone dodge their login
     lockout by faking a new address (see the comment in login(), which stays
     true for those installs). On Render every request arrives via Render's
-    proxy, so without this request.remote_addr would be the proxy's address
+    proxies, so without this request.remote_addr would be a proxy's address
     for everybody and one student's failed attempts would lock out the whole
-    school. The deployment sets LIBRARY_TRUST_PROXY=1 and the app can then
-    only be reached through that proxy, which sets the headers itself.
+    school. The app can then only be reached through those proxies, which
+    set the headers themselves.
+
+    The value is the number of proxies, because the client address is that
+    many entries from the right of X-Forwarded-For. Render has three:
+    HungerHunt, on the same platform, measured it in August 2026 (with 1 the
+    address was one of a small pool of Render edge servers shared by
+    everyone; with 2 it changed on every request; 3 gave one stable address
+    per client). Anything a client puts in the header itself lands to the
+    left of what the proxies append, so it cannot choose its own address.
     """
-    if env.get("LIBRARY_TRUST_PROXY") != "1":
+    hops = _trusted_proxy_hops(env)
+    if not hops:
         return False
     from werkzeug.middleware.proxy_fix import ProxyFix
-    # x_host stays 0: nothing needs the forwarded host, and trusting it would
-    # let a client choose request.host, which _force_https uses as the target
-    # of its redirect.
-    flask_app.wsgi_app = ProxyFix(flask_app.wsgi_app, x_for=1, x_proto=1, x_host=0)
+    # x_proto stays 1: only the nearest proxy's scheme matters, and
+    # _force_https reads the raw header anyway. x_host stays 0: nothing needs
+    # the forwarded host, and trusting it would let a client choose
+    # request.host, which _force_https uses as the target of its redirect.
+    flask_app.wsgi_app = ProxyFix(flask_app.wsgi_app, x_for=hops, x_proto=1, x_host=0)
     return True
 
 
@@ -275,8 +309,8 @@ def _check_proxy_settings(env, module_name):
     """
     Refuses to start an internet-facing deployment that would not see real
     client addresses. On Render (gunicorn imports this module) every request
-    comes through Render's proxy; without LIBRARY_TRUST_PROXY=1 the app sees
-    the proxy's address for everyone, so the per-address sign-in counters
+    comes through Render's proxies; without LIBRARY_TRUST_PROXY the app sees
+    a proxy's address for everyone, so the per-address sign-in counters
     in security.py would treat the whole school as one client: a few wrong
     passwords from anybody would lock everybody out, the admin included.
     Running as `python app.py` (the VPS guide: waitress behind Nginx on the
@@ -285,11 +319,11 @@ def _check_proxy_settings(env, module_name):
     """
     if module_name == "__main__":
         return
-    if env.get("LIBRARY_FORCE_HTTPS_COOKIES") == "1" and env.get("LIBRARY_TRUST_PROXY") != "1":
+    if env.get("LIBRARY_FORCE_HTTPS_COOKIES") == "1" and not _trusted_proxy_hops(env):
         raise RuntimeError(
-            "LIBRARY_FORCE_HTTPS_COOKIES=1 is set but LIBRARY_TRUST_PROXY is not 1. Behind Render's "
-            "proxy every visitor would share one address and sign-in lockouts would hit the whole "
-            "school. Set LIBRARY_TRUST_PROXY=1 (see deploy/DEPLOY_TO_RENDER.md)."
+            "LIBRARY_FORCE_HTTPS_COOKIES=1 is set but LIBRARY_TRUST_PROXY is not. Behind Render's "
+            "proxies every visitor would share one address and sign-in lockouts would hit the whole "
+            "school. Set LIBRARY_TRUST_PROXY=3 on Render (see deploy/DEPLOY_TO_RENDER.md)."
         )
 
 
@@ -860,9 +894,9 @@ def login():
     # is pure client-supplied input — anyone can set it via devtools or a
     # browser extension to get a "fresh" identity and bypass their own
     # lockout. request.remote_addr is the real TCP connection address and
-    # can't be spoofed the same way. On Render, LIBRARY_TRUST_PROXY=1 turns on
+    # can't be spoofed the same way. On Render, LIBRARY_TRUST_PROXY=3 turns on
     # ProxyFix (see _apply_proxy_fix), which makes remote_addr the real client
-    # IP taken from Render's own proxy hop rather than the proxy's address.
+    # IP taken from Render's own proxy hops rather than a proxy's address.
     client_ip = request.remote_addr or "unknown"
     account = f"{role_mode}:{username}"
 

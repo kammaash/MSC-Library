@@ -30,7 +30,7 @@ repository is public.
 | `DATABASE_URL` | Neon pooled connection string, starts `postgresql://` or `postgres://` (both work) | Yes |
 | `LIBRARY_SECRET_KEY` | Run `python -c "import secrets; print(secrets.token_hex(32))"` and paste the output. Keep the same value forever; changing it signs everyone out | Yes |
 | `LIBRARY_FORCE_HTTPS_COOKIES` | `1`. Secure cookies, redirect to HTTPS, HSTS | Yes |
-| `LIBRARY_TRUST_PROXY` | `1`. Makes login lockouts use the student's real IP address instead of Render's proxy. Do not set this on a school-PC install | Yes |
+| `LIBRARY_TRUST_PROXY` | `3`, the number of proxies Render puts in front of the app. Makes login lockouts use the student's real IP address instead of one of Render's. Not `1`: that picks a Render edge server that many students share. Do not set this on a school-PC install | Yes |
 | `LIBRARY_SETUP_TOKEN` | A long random value, e.g. the output of `python -c "import secrets; print(secrets.token_urlsafe(24))"`. With `LIBRARY_FORCE_HTTPS_COOKIES=1` the `/setup` page refuses to work without it and only opens as `/setup?token=<value>`. Keep it secret; it can be removed once the admin account exists | Yes |
 | `PUBLIC_BASE_URL` | `https://library.msceducation.net` (no trailing slash). Used in QR codes and as the Microsoft redirect address | Yes |
 | `TZ` | `Asia/Kolkata`. Makes due dates, fines and report times use Indian time; Render's clock is UTC otherwise | Yes |
@@ -321,14 +321,22 @@ open before you click, and tick "Preserve log").
 
 ### Render
 
-- [ ] **The app sees the real student address (one proxy hop).** On a phone
-      using mobile data, enter a wrong PIN for one student card 5 times. That
-      card must now answer "Too many failed sign-in attempts. Please try
-      again in about 15 minute(s)." Then, on a PC on the school network, sign
-      in to the **same** card with the correct PIN. It must work. If it is
-      also locked, every user is reaching the app with the same address (the
-      wrong `LIBRARY_TRUST_PROXY` setting, or an extra proxy such as
-      Cloudflare in front). The phone's lock lifts by itself after 15 minutes.
+- [ ] **The app sees the real student address (three proxy hops).** Both
+      halves must pass; each one catches a different wrong setting.
+      1. On a phone using **mobile data** (Wi-Fi off), enter a wrong PIN for
+         one student card 5 times, then try a 6th time. The 6th must answer
+         "Too many failed sign-in attempts. Please try again in about 15
+         minute(s)." If it does not, the attempts are being spread over
+         several Render addresses: `LIBRARY_TRUST_PROXY` is too low (or 2).
+      2. Then, on a PC on the school network, sign in to the **same** card
+         with the correct PIN. It must work. If it is also locked, every user
+         reaches the app with one shared address: `LIBRARY_TRUST_PROXY` is
+         too high, or something else (such as a proxied Cloudflare record)
+         sits in front of Render.
+
+      The phone's lock lifts by itself after 15 minutes. Repeat this check
+      once on `https://library.msceducation.net` after go-live, since the
+      custom domain is a different way in.
 - [ ] **The app sees https.** Open `http://<staging address>/`. It must go to
       `https://` once, with no redirect loop. In the browser tools
       (Application, Cookies) the `session` cookie shows **Secure**.
@@ -384,25 +392,27 @@ open before you click, and tick "Preserve log").
       shows. A fine for an overdue book must start counting from the Indian
       due date.
 
-### Cloudflare DNS
+### DNS
 
-- [ ] **`library.msceducation.net` is "DNS only".** In the Cloudflare DNS
-      records for msceducation.net, the `library` record must show a **grey
-      cloud** ("DNS only"), not an orange one ("Proxied"). A proxied record
-      adds a second proxy in front of Render, so the app sees Cloudflare's
-      address and every user appears to share one IP, which defeats the
-      sign-in lockouts and can block Render's certificate. Check this again
-      after step 7 when the record is changed. The staging address
-      (`*.onrender.com`) is not on Cloudflare, so the real record can only be
-      confirmed in step 7; repeat the lockout test under "Render" above on
-      `https://library.msceducation.net` once the domain is live.
+- [ ] **Nothing sits between visitors and Render.** msceducation.net's DNS
+      is at Squarespace Domains, which only points names at addresses and
+      never proxies traffic, so a plain `library` CNAME to Render's target is
+      all that is needed. If the domain's DNS ever moves to Cloudflare, the
+      `library` record there must show a **grey cloud** ("DNS only"), not an
+      orange one ("Proxied"): a proxied record adds another proxy in front of
+      Render, so the app sees Cloudflare's address and every user appears to
+      share one IP, which defeats the sign-in lockouts and can block Render's
+      certificate. Either way, repeat the lockout test under "Render" above
+      on `https://library.msceducation.net` once the domain is live (step 7).
 
 ## 7. Domain
 
 1. In Render, add the custom domain `library.msceducation.net` to the service.
    Render then shows the CNAME target (a `*.onrender.com` host) to use.
-2. In the msceducation.net DNS, change the `library` CNAME from
-   `kammaash.github.io` to the target Render showed you.
+2. In the msceducation.net DNS (Squarespace: Domains, msceducation.net,
+   DNS), change the `library` CNAME from `kammaash.github.io` to the target
+   Render showed you. Leave the other records (the school website on
+   `@`/`www`, Google email on MX) as they are.
    - If the domain's DNS is on Cloudflare, set this record to **DNS only**
      (grey cloud), not proxied. A proxied record interferes with Render's
      certificate.
@@ -451,15 +461,15 @@ permanent, commit the image to the repository as `static/images/logo_main.png`.
   (every push to `main` does this).
 - **Service will not start and logs mention R2 or Entra settings:** one of the
   all-or-nothing groups is only partly filled in.
-- **Service will not start and logs say `LIBRARY_TRUST_PROXY is not 1`:** set
-  `LIBRARY_TRUST_PROXY=1` in Render's environment. The app refuses to run
+- **Service will not start and logs say `LIBRARY_TRUST_PROXY is not`:** set
+  `LIBRARY_TRUST_PROXY=3` in Render's environment. The app refuses to run
   without it because every visitor would otherwise share Render's address.
+  "must be a whole number" means the value is a typo (`true`, `yes`, ...).
 - **One wrong password locks everyone out, or "Too many failed sign-in
   attempts" appears for people who never mistyped:** the app is seeing the
-  same address for every visitor. Check that `LIBRARY_TRUST_PROXY=1` is set
-  and that the Cloudflare DNS record for `library.msceducation.net` is
-  **DNS only** (grey cloud). An orange (proxied) record puts Cloudflare in
-  front of Render as a second proxy, and the app then sees Cloudflare's
-  address instead of the student's.
+  same address for every visitor. Check that `LIBRARY_TRUST_PROXY=3` is set
+  and that nothing proxies traffic in front of Render (see "DNS" under
+  step 6). If people who mistype are **never** locked out, the value is too
+  low. Run the two-part lockout test under "Render" in step 6 to tell which.
 - **Need an old error message:** Render keeps logs for 7 days on the
   Hobby/Free workspace; copy an error out promptly.

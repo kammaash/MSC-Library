@@ -49,7 +49,7 @@ of them. For the cloud values and how to get them, use the table in
 | `LIBRARY_SECRET_KEY` | Session signing key. If unset, a random key is created and saved in `instance_secret.key` next to the database | Cloud (a disk file is lost on Render). Optional on a PC |
 | `LIBRARY_FORCE_HTTPS_COOKIES` | `1` = Secure cookies, redirect to HTTPS and HSTS. Also switches on the `LIBRARY_SETUP_TOKEN` rule | Cloud or any internet-facing install. Leave unset on a LAN |
 | `LIBRARY_SETUP_TOKEN` | With `LIBRARY_FORCE_HTTPS_COOKIES=1`, `/setup` only works as `/setup?token=<value>`; setup is refused if this is unset. Not needed when the flag is off | Cloud. Not needed on a PC |
-| `LIBRARY_TRUST_PROXY` | `1` = trust one proxy hop (`X-Forwarded-For` and `X-Forwarded-Proto`), so sign-in lockouts use the real client address | Cloud (Render). Do not set on a PC |
+| `LIBRARY_TRUST_PROXY` | Number of proxies in front of the app (`3` on Render). The client address is read that many entries from the right of `X-Forwarded-For`, so sign-in lockouts use the real client address | Cloud (Render). Do not set on a PC |
 | `PUBLIC_BASE_URL` | Public https address of the site, no trailing slash. Used in QR codes and as the Microsoft redirect address | Cloud; required with `ENTRA_*` |
 | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` | Store uploads and backups in a Cloudflare R2 bucket instead of the `uploads/` and `backups/` folders. All four or none | Cloud |
 | `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET` | "Sign in with Microsoft" for students. All three or none (and `PUBLIC_BASE_URL`) | Optional (cloud) |

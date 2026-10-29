@@ -28,8 +28,15 @@
   `/setup?token=<value>` and is refused while the variable is unset, so a
   stranger who reaches a fresh database first cannot make themselves admin.
   Wrong tokens count towards the sign-in limits. LAN installs are unchanged.
+- **`LIBRARY_TRUST_PROXY` is now the number of proxies** in front of the
+  app, and Render needs **`3`**, not `1`. Render passes each request
+  through three proxies; with `1` the app read the address of a Render edge
+  server that many students share, so the per-address sign-in limits would
+  have counted the whole school together (measured on HungerHunt, which
+  runs on the same platform). `1` still means one proxy. A value that is not
+  a whole number from 0 to 10 stops the app at startup.
 - **The app refuses to start** when imported by gunicorn with
-  `LIBRARY_FORCE_HTTPS_COOKIES=1` but without `LIBRARY_TRUST_PROXY=1`:
+  `LIBRARY_FORCE_HTTPS_COOKIES=1` but without `LIBRARY_TRUST_PROXY`:
   behind Render's proxy every visitor would share one address and the
   sign-in limits would lock out the whole school. `python app.py` (the VPS
   guide's waitress setup) is not affected.
