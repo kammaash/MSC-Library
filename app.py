@@ -1861,6 +1861,9 @@ def delete_member(mid):
     # account (a staff login that was linked to a member) is kept, just
     # unlinked. Loans, fines, lost-book and certificate records are library
     # history and are deliberately kept.
+    # The ids are read first so their security-flag rows can be dropped once
+    # the delete is committed (see security.forget_user).
+    student_user_ids = [u.id for u in User.query.filter_by(member_id=member.id, role="student").all()]
     User.query.filter_by(member_id=member.id, role="student").delete(synchronize_session=False)
     User.query.filter_by(member_id=member.id).update({"member_id": None}, synchronize_session=False)
     for model in (Bookmark, Favorite, ReadHistory, DigitalLibraryVisit, PinResetRequest):
@@ -1868,6 +1871,10 @@ def delete_member(mid):
     qr_key = member.qr_path
     db.session.delete(member)
     db.session.commit()
+    # Only after the commit: if the delete had failed the accounts would still
+    # exist and must keep their "must change password" state.
+    for user_id in student_user_ids:
+        security.forget_user(DB_PATH, user_id)
     # Only now is it safe to drop the file: the record that named it is gone.
     storage.delete(qr_key)
     return jsonify({"ok": True})
@@ -3378,8 +3385,11 @@ def delete_user(uid):
     user = User.query.get_or_404(uid)
     if user.role == "admin" and User.query.filter_by(role="admin").count() <= 1:
         return jsonify({"error": "At least one Admin account must remain."}), 400
+    user_id = user.id
     db.session.delete(user)
     db.session.commit()
+    # After the commit, so a failed delete leaves the account's flag alone.
+    security.forget_user(DB_PATH, user_id)
     return jsonify({"ok": True})
 
 
@@ -3652,7 +3662,11 @@ def import_books():
     try:
         excel = pd.ExcelFile(file)
     except Exception as e:
-        return jsonify({"error": f"Could not read this file as an Excel workbook: {e}"}), 400
+        # The parser's own message can name internal paths or library
+        # details; the person importing only needs to know what to do next.
+        app.logger.warning("Could not read uploaded Excel file: %s", e)
+        return jsonify({"error": "Could not read this file as an Excel workbook. "
+                                 "Please save it as .xlsx and try again."}), 400
 
     try:
         # --------------------------------------------------------------
@@ -3791,7 +3805,11 @@ def import_members():
     try:
         excel = pd.ExcelFile(file)
     except Exception as e:
-        return jsonify({"error": f"Could not read this file as an Excel workbook: {e}"}), 400
+        # The parser's own message can name internal paths or library
+        # details; the person importing only needs to know what to do next.
+        app.logger.warning("Could not read uploaded Excel file: %s", e)
+        return jsonify({"error": "Could not read this file as an Excel workbook. "
+                                 "Please save it as .xlsx and try again."}), 400
 
     try:
         best_sheet, best_map, best_score = None, {}, -1

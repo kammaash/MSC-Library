@@ -33,7 +33,6 @@ uses db_path with sqlite3, exactly as before.
 import os
 import sqlite3
 import time
-import threading
 
 # psycopg2 is only imported lazily, inside _get_connection(), and only when
 # DATABASE_URL is actually set — so a plain local SQLite run never needs it
@@ -114,6 +113,29 @@ def ensure_security_tables(db_path):
                 locked_until DOUBLE PRECISION
             )
         """)
+        if _DATABASE_URL:
+            # An earlier version of this table declared the two time columns
+            # as REAL. On Postgres that is a 4-byte float, which cannot hold
+            # a Unix timestamp to the second (about 1.76 billion needs more
+            # than its 24 bits of precision), so lock expiry times would be
+            # off by tens of seconds. CREATE TABLE IF NOT EXISTS leaves an
+            # existing table alone, so widen the columns here. The query
+            # only finds columns that are still `real`, which makes this a
+            # no-op once they are double precision. It is deliberately not
+            # wrapped in a try/except: this runs at startup, and a failed
+            # ALTER should stop the deploy rather than leave imprecise locks.
+            narrow = _exec(
+                conn,
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = ? "
+                "AND column_name IN ('window_start', 'locked_until') AND data_type = 'real'",
+                ("login_rate_limits",),
+            ).fetchall()
+            for (column,) in narrow:
+                # The names come from the fixed list in the query above, never
+                # from input, so building the statement by formatting is safe.
+                _exec(conn, f"ALTER TABLE login_rate_limits ALTER COLUMN {column} "
+                            "TYPE DOUBLE PRECISION")
         conn.commit()
     finally:
         conn.close()
@@ -276,11 +298,13 @@ def password_is_strong_enough(pw):
 # gets a fresh 5 attempts, indefinitely. It's now backed by the
 # `login_rate_limits` table in the app's actual database, so lockouts
 # survive a restart the same way everything else in this app already
-# does. The in-process lock is kept alongside it purely to avoid two
-# near-simultaneous requests both reading "4 attempts" and both writing
-# back "5" instead of one of them seeing the other's update — note this
-# only coordinates threads within one process; see the module docstring
-# for the multi-process caveat under gunicorn.
+# does. Counting is a single atomic INSERT ... ON CONFLICT DO UPDATE (see
+# _count_failure), so two near-simultaneous requests cannot both read
+# "4 attempts" and both write back "5": the database serialises them on the
+# row, across threads and across processes alike. There used to be an
+# in-process lock held around the whole read-then-write; on Neon that made
+# every sign-in wait behind a network round trip, and it never helped with
+# more than one process anyway.
 #
 # Three counters share that table, because a lock keyed only on
 # (IP, username) has two holes on an internet-facing login page: from one
@@ -317,8 +341,6 @@ IP_LOCK_SECONDS = 15 * 60
 
 # Stored in locked_until for a lock that only a librarian can lift.
 UNTIL_CLEARED = -1.0
-
-_lock = threading.Lock()
 
 
 def _key(ip, username):
@@ -374,29 +396,54 @@ def login_block(db_path, ip, pair_name, account):
 def _count_failure(conn, key, now, max_failures, window_seconds, lock_seconds):
     """Adds one failure to a counter and returns the new count. A lock that
     has expired, or a window that has run out, starts a fresh count.
-    lock_seconds=None locks until clear_account_lock() is called."""
-    row = _exec(
-        conn, "SELECT fail_count, window_start, locked_until FROM login_rate_limits WHERE rate_key = ?",
-        (key,),
-    ).fetchone()
-    if row and row[2] == UNTIL_CLEARED:
-        return row[0]
-    if row and row[2] is None and (now - row[1]) < window_seconds:
-        fail_count, window_start = row[0] + 1, row[1]
-    else:
-        fail_count, window_start = 1, now
-    locked_until = None
-    if fail_count >= max_failures:
-        locked_until = UNTIL_CLEARED if lock_seconds is None else now + lock_seconds
-    _exec(
-        conn,
-        "INSERT INTO login_rate_limits (rate_key, fail_count, window_start, locked_until) "
-        "VALUES (?, ?, ?, ?) ON CONFLICT(rate_key) DO UPDATE SET "
-        "fail_count = excluded.fail_count, window_start = excluded.window_start, "
-        "locked_until = excluded.locked_until",
-        (key, fail_count, window_start, locked_until),
+    lock_seconds=None locks until clear_account_lock() is called.
+
+    The whole read-modify-write is one statement, so concurrent failures for
+    the same key cannot lose an update and no lock is needed around it. The
+    CASE expressions below all read the row as it was before this statement:
+      - a lock still in force (locked_until = -1, waiting for a librarian, or
+        a timed lock not yet expired): row left untouched. login_block
+        refuses those attempts first, but requests sent in parallel can pass
+        it before the lock lands, and they must not reset the count;
+      - no lock and still inside the window: count + 1, same window start,
+        and a lock is set when the new count reaches the maximum;
+      - anything else (window ran out, or a timed lock): back to a count of 1
+        in a new window, which itself locks if the maximum is 1.
+    Columns are table-qualified because Postgres rejects bare names in an
+    upsert's SET clause as ambiguous with `excluded`."""
+    t = "login_rate_limits"
+    cleared = int(UNTIL_CLEARED)
+    lock_value = UNTIL_CLEARED if lock_seconds is None else now + lock_seconds
+    first_lock = lock_value if max_failures <= 1 else None
+    counting = f"{t}.locked_until IS NULL AND ? - {t}.window_start < ?"
+    held = f"({t}.locked_until = {cleared} OR {t}.locked_until > ?)"
+    sql = (
+        f"INSERT INTO {t} (rate_key, fail_count, window_start, locked_until) "
+        "VALUES (?, 1, ?, ?) "
+        "ON CONFLICT(rate_key) DO UPDATE SET "
+        f"fail_count = CASE WHEN {held} THEN {t}.fail_count "
+        f"WHEN {counting} THEN {t}.fail_count + 1 ELSE 1 END, "
+        f"window_start = CASE WHEN {held} THEN {t}.window_start "
+        f"WHEN {counting} THEN {t}.window_start ELSE ? END, "
+        f"locked_until = CASE WHEN {held} THEN {t}.locked_until "
+        f"WHEN {counting} THEN (CASE WHEN {t}.fail_count + 1 >= ? THEN ? ELSE NULL END) "
+        "ELSE ? END"
     )
-    return fail_count
+    params = (
+        key, now, first_lock,            # the VALUES row, used when the key is new
+        now, now, window_seconds,        # fail_count: lock in force? inside the window?
+        now, now, window_seconds, now,   # window_start: same, else a new start
+        now, now, window_seconds,        # locked_until: same
+        max_failures, lock_value,        # ... reached the maximum -> lock
+        first_lock,                      # new window of 1 failure
+    )
+    if sqlite3.sqlite_version_info >= (3, 35, 0):
+        return _exec(conn, sql + " RETURNING fail_count", params).fetchone()[0]
+    # SQLite older than 3.35 has no RETURNING. The upsert has just taken the
+    # database's write lock for this transaction, so reading the row back
+    # here sees exactly the value it wrote.
+    _exec(conn, sql, params)
+    return _exec(conn, f"SELECT fail_count FROM {t} WHERE rate_key = ?", (key,)).fetchone()[0]
 
 
 def record_login_failure(db_path, ip, pair_name, account, account_exists=True,
@@ -409,47 +456,44 @@ def record_login_failure(db_path, ip, pair_name, account, account_exists=True,
     librarian; staff accounts pass STAFF_ACCOUNT_LOCK_SECONDS.
     """
     now = time.time()
-    with _lock:
-        conn = _get_connection(db_path)
-        try:
-            pair_count = _count_failure(conn, _key(ip, pair_name), now,
-                                        MAX_ATTEMPTS, LOCKOUT_SECONDS, LOCKOUT_SECONDS)
-            remaining = MAX_ATTEMPTS - pair_count
-            if account_exists:
-                account_count = _count_failure(conn, _account_key(account), now, ACCOUNT_MAX_FAILURES,
-                                               ACCOUNT_WINDOW_SECONDS, account_lock_seconds)
-                remaining = min(remaining, ACCOUNT_MAX_FAILURES - account_count)
-            _count_failure(conn, _ip_key(ip), now, IP_MAX_FAILURES, IP_WINDOW_SECONDS, IP_LOCK_SECONDS)
-            conn.commit()
-            return max(0, remaining)
-        finally:
-            conn.close()
+    conn = _get_connection(db_path)
+    try:
+        pair_count = _count_failure(conn, _key(ip, pair_name), now,
+                                    MAX_ATTEMPTS, LOCKOUT_SECONDS, LOCKOUT_SECONDS)
+        remaining = MAX_ATTEMPTS - pair_count
+        if account_exists:
+            account_count = _count_failure(conn, _account_key(account), now, ACCOUNT_MAX_FAILURES,
+                                           ACCOUNT_WINDOW_SECONDS, account_lock_seconds)
+            remaining = min(remaining, ACCOUNT_MAX_FAILURES - account_count)
+        _count_failure(conn, _ip_key(ip), now, IP_MAX_FAILURES, IP_WINDOW_SECONDS, IP_LOCK_SECONDS)
+        conn.commit()
+        return max(0, remaining)
+    finally:
+        conn.close()
 
 
 def record_login_success(db_path, ip, pair_name, account):
     """Resets the pair and account counters after a successful sign-in. The
     per-address counter is left alone: otherwise an attacker could reset it
     by signing in to their own account between guesses."""
-    with _lock:
-        conn = _get_connection(db_path)
-        try:
-            _exec(conn, "DELETE FROM login_rate_limits WHERE rate_key IN (?, ?)",
-                  (_key(ip, pair_name), _account_key(account)))
-            conn.commit()
-        finally:
-            conn.close()
+    conn = _get_connection(db_path)
+    try:
+        _exec(conn, "DELETE FROM login_rate_limits WHERE rate_key IN (?, ?)",
+              (_key(ip, pair_name), _account_key(account)))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def clear_account_lock(db_path, account):
     """What the librarian's Unlock button does: forgets the account's
     failures, including a lock that would otherwise never lift."""
-    with _lock:
-        conn = _get_connection(db_path)
-        try:
-            _exec(conn, "DELETE FROM login_rate_limits WHERE rate_key = ?", (_account_key(account),))
-            conn.commit()
-        finally:
-            conn.close()
+    conn = _get_connection(db_path)
+    try:
+        _exec(conn, "DELETE FROM login_rate_limits WHERE rate_key = ?", (_account_key(account),))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def locked_accounts(db_path):
