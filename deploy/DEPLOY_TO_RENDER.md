@@ -168,9 +168,13 @@ Now create the service:
    hours. To undo a bad deploy: Render → Deploys → the previous deploy →
    Rollback.
 2. Plan: **Starter** is recommended for school hours. The **Free** plan works
-   for trying it out, but it sleeps after a period of no visits; each wake-up
-   restarts the app, which signs everyone out (login sessions are tied to the
-   running process), and the first page load is slow.
+   too, but it sleeps after 15 minutes with no visits; each wake-up restarts
+   the app, which signs everyone out (login sessions are tied to the running
+   process), and the first page load takes up to a minute. Section 10 keeps
+   a Free instance awake during school hours. Free instance hours (750 a
+   month) are shared by every Free service in the Render **workspace**, so
+   keep SmartLib in its own workspace if another Free service there runs
+   around the clock.
 3. Build command: `pip install -r requirements.txt`. Start command: Render
    does not read the `Procfile`, so paste the same text into the Start Command
    box (`gunicorn app:app --workers 1 --threads 8 --timeout 120`). Keep
@@ -346,6 +350,15 @@ open before you click, and tick "Preserve log").
       Render logs while it runs; a worker restart or "out of memory" message
       there is a failure.
 
+- [ ] **Free plan only: the pinger keeps Render awake but lets Neon sleep.**
+      Set up the cron-job.org job (section 10) against the staging address
+      and leave the site unused for an hour. Then: the job history shows
+      `200` every 10 minutes; opening the site is instant and a session
+      started before the hour is still signed in; and Neon's Monitoring page
+      for the staging branch shows the compute suspended for most of that
+      hour (shaded, values at 0). If Neon stayed active, something other
+      than `/healthz` is being requested.
+
 ### Microsoft Entra
 
 - [ ] **What `preferred_username` contains.** In Entra, open Users, then a
@@ -449,6 +462,41 @@ permanent, commit the image to the repository as `static/images/logo_main.png`.
   accounts (for example a school drive). A cloud account problem would
   otherwise take the data and the backups together.
 
+## 10. Keeping a Free instance awake (Free plan only)
+
+Render puts a Free instance to sleep after 15 minutes without a request.
+An uptime service that loads `/healthz` every 10 minutes during school hours
+stops that, so nobody is signed out between visits. Skip this section on
+Starter, which never sleeps.
+
+`/healthz` answers `ok` without touching the database. That matters: Neon's
+Free plan allows 100 compute-hours a month and suspends the database after
+that, and a ping that woke the database every 10 minutes would keep it
+running all the time. Point the pinger at `/healthz` only, never at `/login`
+or another page.
+
+Use a dedicated uptime service, not a GitHub Actions schedule: GitHub runs
+frequent schedules late or not at all (a 10-minute schedule in another
+project ran about 6 times a day), which does not keep anything awake.
+
+1. Create a free account at **cron-job.org**.
+2. Create a cron job:
+   - URL: `https://library.msceducation.net/healthz` (the staging address
+     while testing).
+   - Schedule: every 10 minutes, hours 07 to 17, Monday to Saturday, time
+     zone **Asia/Kolkata**. Adjust to the school's real hours; the instance
+     stays awake about 15 minutes after the last ping.
+   - Leave failure notifications on. The first ping of the morning may time
+     out while Render wakes the instance (up to a minute); that is expected
+     and the next one succeeds. Repeated failures all day mean the site is
+     down.
+3. Save, then use the job's "test run" and check it shows `200`.
+
+Budget: 11 hours a day, 6 days a week is about 290 instance hours a month,
+well inside Render's 750. Sign-outs still happen when the app is redeployed
+(every push to `main`), when Render restarts a Free instance on its own
+(rare), and on the first visit outside the pinged hours.
+
 ## Troubleshooting
 
 - **Every student gets "Please sign in with your school Microsoft account":**
@@ -457,8 +505,12 @@ permanent, commit the image to the repository as `static/images/logo_main.png`.
 - **Microsoft sign-in suddenly stopped working for everyone:** the client
   secret has probably expired (see step 3).
 - **Everyone is signed out at random times:** the Render Free plan has
-  restarted after sleeping (use Starter), or the service was redeployed
-  (every push to `main` does this).
+  restarted after sleeping (keep it awake as in section 10, or use Starter),
+  or the service was redeployed (every push to `main` does this). On Free,
+  check the cron-job.org job history for failed or missing pings.
+- **Neon says the compute-hour limit is reached:** something keeps the
+  database awake. Check the uptime service pings `/healthz`, not another
+  page, and that no other monitor points at the site.
 - **Service will not start and logs mention R2 or Entra settings:** one of the
   all-or-nothing groups is only partly filled in.
 - **Service will not start and logs say `LIBRARY_TRUST_PROXY is not`:** set

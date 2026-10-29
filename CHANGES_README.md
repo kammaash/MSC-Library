@@ -28,6 +28,11 @@
   `/setup?token=<value>` and is refused while the variable is unset, so a
   stranger who reaches a fresh database first cannot make themselves admin.
   Wrong tokens count towards the sign-in limits. LAN installs are unchanged.
+- **`/healthz`** answers `ok` without touching the database, before setup
+  too. An uptime service pings it during school hours to keep a Render
+  Free instance from sleeping (and signing everyone out on waking) without
+  keeping Neon's Free-plan compute awake. See section 10 of
+  `deploy/DEPLOY_TO_RENDER.md`.
 - **`LIBRARY_TRUST_PROXY` is now the number of proxies** in front of the
   app, and Render needs **`3`**, not `1`. Render passes each request
   through three proxies; with `1` the app read the address of a Render edge

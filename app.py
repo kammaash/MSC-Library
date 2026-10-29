@@ -665,6 +665,7 @@ def inject_csrf_token():
 # uploaded files (logos etc.) must stay reachable too, or the wizard/login
 # pages themselves render broken.
 _SETUP_EXEMPT_PREFIXES = ("/setup", "/static", "/uploads")
+_SETUP_EXEMPT_PATHS = ("/healthz",)
 _PASSWORD_CHANGE_EXEMPT_PREFIXES = ("/static", "/uploads", "/logout")
 _PASSWORD_CHANGE_EXEMPT_PATHS = ("/change-password", "/api/account/change-password", "/api/whoami")
 
@@ -684,7 +685,7 @@ def _require_first_run_setup():
     on first launch. This is the school's one chance to pick their own
     admin credentials before the system is usable at all.
     """
-    if request.path.startswith(_SETUP_EXEMPT_PREFIXES):
+    if request.path.startswith(_SETUP_EXEMPT_PREFIXES) or request.path in _SETUP_EXEMPT_PATHS:
         return None
     global _SETUP_COMPLETE_CACHE
     if _SETUP_COMPLETE_CACHE:
@@ -872,6 +873,18 @@ def _normalize_setup_code(value):
 def _student_account(member):
     """The account name the sign-in counters use for this student."""
     return f"student:{member.admission_no or ''}"
+
+
+# For an uptime service that keeps a Render Free instance awake during school
+# hours (Render puts it to sleep after 15 minutes without a request, and the
+# restart on waking signs everyone out). It must not touch the database:
+# Neon's Free plan allows 100 compute-hours a month and suspends the database
+# after that, and a ping every few minutes that woke it would keep it running
+# around the clock. _require_first_run_setup lets it through, and a pinger
+# sends no session cookie, so no other hook loads a user from the database.
+@app.route("/healthz")
+def healthz():
+    return "ok", 200, {"Content-Type": "text/plain; charset=utf-8"}
 
 
 @app.route("/login", methods=["GET", "POST"])
