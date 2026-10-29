@@ -21,6 +21,33 @@
 
 ---
 
+## Deployment hardening (October 2026)
+
+- **`LIBRARY_SETUP_TOKEN`** (new env var). With
+  `LIBRARY_FORCE_HTTPS_COOKIES=1`, `/setup` only works as
+  `/setup?token=<value>` and is refused while the variable is unset, so a
+  stranger who reaches a fresh database first cannot make themselves admin.
+  Wrong tokens count towards the sign-in limits. LAN installs are unchanged.
+- **The app refuses to start** when imported by gunicorn with
+  `LIBRARY_FORCE_HTTPS_COOKIES=1` but without `LIBRARY_TRUST_PROXY=1`:
+  behind Render's proxy every visitor would share one address and the
+  sign-in limits would lock out the whole school. `python app.py` (the VPS
+  guide's waitress setup) is not affected.
+- **Content-Security-Policy** on every page when
+  `LIBRARY_FORCE_HTTPS_COOKIES=1`: scripts only from the app itself; files
+  also from the R2 bucket's host. The login, setup and change-password
+  scripts moved to `static/js/`, and no page uses inline `onclick=` handlers
+  any more.
+- Over-long text (a name, rack number, title… longer than its database
+  column) is now refused with a message naming the field instead of a
+  server error on Postgres; Excel imports skip such rows and count them.
+- Students can open only their own member QR code (and digital items'
+  codes); staff see all of them as before.
+- Large digital-library uploads are written to disk once (via
+  `upload_tmp/` next to `uploads/`), not copied from the system temp folder.
+
+---
+
 ## Behaviour changes in the cloud-deployment branch
 
 These differ from the `main` branch and can surprise staff or students.
